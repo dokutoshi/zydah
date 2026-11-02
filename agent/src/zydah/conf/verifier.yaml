@@ -1,0 +1,49 @@
+# Zydah verifier hyperparameters (Hydra / OmegaConf).
+# Standing rule: no magic numbers in code — tune values here.
+
+width_threshold: 0.35
+conflict_threshold: 0.35
+tau: 0.80
+rule: yager
+world: closed
+max_iterations: 3
+
+good_verdict: good
+question: "Need more info, what question reduces uncertainty?"
+additional_info_prefix: "\n\nAdditional information:\n"
+metric_format: ".4f"
+
+direct_mass_prompt_template: |
+  You are an expert evaluator. Assess the evidence below against the
+  labels {labels}.
+
+  Return ONLY a JSON object mapping each label to a probability mass,
+  plus an "omega" key for your ignorance (mass you cannot commit to any
+  label). Masses must be non-negative numbers summing to 1.
+
+  Evidence:
+  {evidence}
+
+prompt_template: |
+  You are System 2, the high-conflict reasoning step for Zydah.
+
+  Evidence under review:
+  {evidence}
+
+  The belief-fusion validator flagged this answer as speculative:
+  - verdict: {verdict}
+  - decision: {decision}
+  - Bel: {bel}
+  - Pl: {pl}
+  - interval width: {width}
+  - conflict mass: {conflict}
+
+  {question}
+
+  Answer with the additional information that most reduces uncertainty.
+  Stay within the closed world of the provided evidence; do not invent sources.
+
+model:
+  id: muse-spark
+  env_var: ZYDAH_VERIFIER_MODEL
+  cost_tier: low

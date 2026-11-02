@@ -9,12 +9,15 @@ Muse Code reads this file as project rules when it runs in this directory.
 
 ## Common Commands
 
-- `source .venv/bin/activate; pip install -e ".[dev]"; pytest`
+- `uv sync --extra dev; uv run pytest` (uv manages `.venv`; do not use pip/venv)
 
 ## Project Layout
 
-- `zydah/fusion.py` — DS/Yager/TBM fusion core
-- `zydah/judges.py` — Meta-model panel, JSON parsing, mock
-- `zydah/router.py` — interval decision + escalation
+- `src/zydah/fusion.py` — DS/Yager/TBM fusion core
+- `src/zydah/judges.py` — Meta-model panel, JSON parsing, mock
+- `src/zydah/router.py` — interval decision + escalation
+- `src/zydah/interface.py` — [muse]/[zydah] pipe-through API
+- `src/zydah/verifier.py` — System 2 verifier loop, Hydra/OmegaConf config
+- `src/zydah/conf/verifier.yaml` — verifier hyperparameters (no magic numbers)
 - `eval/harness.py` — baselines comparison harness
 - `tests/` — pytest suite, no API calls

@@ -12,20 +12,6 @@ Sync contract (for the future script, not yet built):
 - `Jira:` is `-` until synced, then the Cloud issue key (e.g. `ABC-123`).
 - Secrets come only from environment variables; never paste keys here.
 
-## ZYDAH-001 — Decide uv vs pixi and add lockfile
-
-- Status: open
-- Priority: high
-- Area: packaging
-- Source: user request (future package additions)
-- Jira: -
-- Updated: 2026-11-02
-- Details: repo currently uses `python3 -m venv .venv` + `pip install -e
-  ".[dev]"` with no lockfile (`pyproject.toml` pins nothing). Pick one
-  manager, add its lockfile, and update `README.md` quickstart and
-  `AGENTS.md` common commands.
-- Acceptance: clean-clone install reproduces the environment from the
-  lockfile; `pytest` passes under the new flow.
 
 ## ZYDAH-002 — Wire Jira Cloud sync for todo files
 
@@ -51,7 +37,7 @@ Sync contract (for the future script, not yet built):
 - Source: derivation doc §11 follow-up (deferred in plan)
 - Jira: -
 - Updated: 2026-11-02
-- Details: `discount_mass` exists in `zydah/fusion.py` but nothing calls
+- Details: `discount_mass` exists in `src/zydah/fusion.py` but nothing calls
   it. The doc says a robust system does both (discount before, keep
   conflict after), but where each judge's `alpha` comes from is a product
   decision: fixed per-judge reliability, calibrated from data, or
@@ -64,7 +50,7 @@ Sync contract (for the future script, not yet built):
 - Status: open
 - Priority: medium
 - Area: router
-- Source: README thesis vs `zydah/router.py`
+- Source: README thesis vs `src/zydah/router.py`
 - Jira: -
 - Updated: 2026-11-02
 - Details: README says "escalate on evidence (high conflict mass / wide
@@ -74,26 +60,12 @@ Sync contract (for the future script, not yet built):
   width thresholds belong in the decision, then implement or record why not.
 - Acceptance: decision recorded; router and README agree; tests updated.
 
-## ZYDAH-005 — Wire Meta Model API transport
-
-- Status: open
-- Priority: medium
-- Area: judges
-- Source: `zydah/judges.py` (`MetaApiJudge.judge` raises `NotImplementedError`)
-- Jira: -
-- Updated: 2026-11-02
-- Details: prompt construction and response parsing are implemented;
-  transport is intentionally unwired. Add the real client using
-  `META_API_KEY` from env only, keeping `SeededMockPanel` for tests.
-- Acceptance: live judge path works end to end; unit tests still make no
-  API calls; no secrets in the repo.
-
 ## ZYDAH-006 — Verify Baseten Spark Open path
 
 - Status: open
 - Priority: low
 - Area: judges
-- Source: `zydah/judges.py` (`BasetenJudge`, `meta-models/muse-spark-open-1026`)
+- Source: `src/zydah/judges.py` (`BasetenJudge`, `meta-models/muse-spark-open-1026`)
 - Jira: -
 - Updated: 2026-11-02
 - Details: model ID is recorded but the Baseten path is unverified.
@@ -110,7 +82,7 @@ Sync contract (for the future script, not yet built):
 - Jira: -
 - Updated: 2026-11-02
 - Details: add Shafer (1976) reliability discounting to the README "Math"
-  section and the `zydah/fusion.py` layout line so docs match code.
+  section and the `src/zydah/fusion.py` layout line so docs match code.
 - Acceptance: README names all four published methods with one-line roles.
 
 ## ZYDAH-008 — Add discounted-Zydah arm to harness comparison
@@ -126,3 +98,55 @@ Sync contract (for the future script, not yet built):
   Add the arm and record how discounting shifts accuracy, coverage, and
   flip rate on the seeded mock panel.
 - Acceptance: `compare()` includes the arm; metrics documented; tests updated.
+
+## ZYDAH-009 — Open-world verifier mode via web fetch
+
+- Status: open
+- Priority: medium
+- Area: verifier
+- Source: user note (closed world now; open world will utilize webfetch)
+- Jira: -
+- Updated: 2026-11-02
+- Details: `ZydahVerifier` currently raises `NotImplementedError` when
+  `world: open` in `src/zydah/conf/verifier.yaml`. Implement evidence
+  gathering via web fetch so flagged questions can pull external sources,
+  then re-fuse. Keep closed-world path unchanged.
+- Acceptance: open mode fetches for the flagged question, cites sources,
+  and iterates like the closed loop; tests use fixtures, no live calls.
+
+## ZYDAH-011 — Structured logging + prompt/response-weighted mass assignment
+
+- Status: open
+- Priority: high
+- Area: logging / verifier
+- Source: user hypothesis (prompt + response determine follow-up need)
+- Jira: -
+- Updated: 2026-11-02
+- Details: hypothesis — mass assignment improves when the model weighs a
+  response in context, not an isolated claim. Today `verify_direct` asks
+  for mass on a bare claim and the model returns all-Ω (width 1.0), so
+  follow-ups never converge. Two parts: (1) structured logging per cycle
+  — original prompt, model response, elicited mass, Bel/Pl/width/conflict,
+  validator output, follow-up prompt/response, model IDs, timings;
+  (2) feed prompt+response (not claim alone) into mass elicitation, and
+  let the validator decide follow-ups from that pair.
+- Acceptance: JSONL logs per verify run; test shows prompt+response input
+  commits mass where claim-only input returned all-Ω.
+
+## ZYDAH-012 — Prompt taxonomy and pass/intercept routing gate
+
+- Status: open
+- Priority: high
+- Area: routing / verifier
+- Source: user insight (a greeting is not a pass/partial/fail claim)
+- Jira: -
+- Updated: 2026-11-02
+- Details: the {pass, partial, fail} frame only fits evaluative claims.
+  A routing gate should classify input before fusion: greeting/smalltalk
+  and plain commands pass through untouched; checkable factual claims
+  and agent answers intercept into the verifier; underspecified prompts
+  clarify first; high-stakes content intercepts with stricter thresholds.
+  Today "hi" burns 3 follow-ups because nothing routes it away.
+- Acceptance: taxonomy table implemented as a gate in front of
+  `verify_direct`; greeting/command fixtures pass with zero model mass
+  calls; claim fixtures still intercept.

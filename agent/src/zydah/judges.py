@@ -13,11 +13,15 @@ and make no API calls.
 
 from __future__ import annotations
 
+import json
 import os
 import random
-from typing import Dict, FrozenSet, List, Mapping, Sequence
+from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence
+
+from omegaconf import OmegaConf
 
 from zydah.fusion import Mass, make_mass
+from zydah.transport import chat_complete, load_transport_config
 
 JUDGE_WONDER = "muse-wonder"
 JUDGE_SPARK = "muse-spark"
@@ -112,12 +116,23 @@ class SeededMockPanel:
         return masses
 
 
-class MetaApiJudge:
-    """Judge backed by the Meta Model API (client wiring is future work).
+def extract_json_object(text: str) -> Dict:
+    """Extract the first JSON object from model text (fences tolerated)."""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError(f"no JSON object in model response: {text[:80]!r}")
+    parsed = json.loads(text[start : end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError(f"model response JSON is not an object: {text[:80]!r}")
+    return parsed
 
-    Prompt construction and response parsing are implemented; transport is
-    intentionally unwired rather than guessed. judge() raises until a real
-    client lands.
+
+class MetaApiJudge:
+    """Judge backed by the model API transport (see zydah.transport).
+
+    The endpoint model comes from the env var named in transport.yaml
+    when set; otherwise the judge's own ``model`` name is sent.
     """
 
     def __init__(self, model: str, api_key: str | None = None) -> None:
@@ -130,10 +145,39 @@ class MetaApiJudge:
     def parse(self, response: Mapping[str, float], frame: FrozenSet[str]) -> Mass:
         return parse_mass_json(response, frame)
 
+    def parse_text(self, text: str, frame: FrozenSet[str]) -> Mass:
+        return parse_mass_json(extract_json_object(text), frame)
+
+    def _live_model(self) -> str:
+        cfg = load_transport_config()
+        env_model = os.environ.get(str(OmegaConf.select(cfg, "model_env")))
+        return env_model or self.model
+
     def judge(self, evidence: str, frame: FrozenSet[str]) -> Mass:
-        raise NotImplementedError(
-            "Meta Model API transport not wired; use prompt()/parse() with a real client"
+        text = chat_complete(self.prompt(evidence, frame), model_id=self._live_model())
+        return self.parse_text(text, frame)
+
+
+class LivePanel:
+    """Judge panel over live MetaApiJudge clients (elicit-compatible).
+
+    ``item_id`` carries the evidence text, matching how the pipe-through
+    interface calls panels. One mass per judge, in judge order.
+    """
+
+    def __init__(
+        self,
+        frame: FrozenSet[str],
+        judges: Optional[Sequence[MetaApiJudge]] = None,
+    ) -> None:
+        self.frame = frozenset(frame)
+        self.judges = list(
+            judges
+            or [MetaApiJudge(JUDGE_WONDER), MetaApiJudge(JUDGE_SPARK), BasetenJudge()]
         )
+
+    def elicit(self, item_id: str = "", run: int = 0) -> List[Mass]:
+        return [judge.judge(item_id, self.frame) for judge in self.judges]
 
 
 class BasetenJudge(MetaApiJudge):
