@@ -58,6 +58,7 @@ Never commit secrets. Unit tests use a seeded mock panel — no API calls.
 - `src/zydah/router.py` — interval-based decision + escalation policy
 - `src/zydah/interface.py` — [muse] direct / [zydah] fused pipe-through API
 - `src/zydah/verifier.py` — System 2 verifier loop (Hydra/OmegaConf YAML config)
+- `src/zydah/evidence.py` — provenance ledger + anti-eavesdropping session rule
 - `eval/harness.py` — majority vote vs. averaging vs. Dempster vs. Zydah
 - `tests/` — Zadeh's paradox, order invariance, sum-to-1 (no API calls)
 

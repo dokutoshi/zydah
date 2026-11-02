@@ -1,11 +1,12 @@
 """Zydah verifier: System 2 escalation loop for speculative fused verdicts.
 
 The validator treats a wide [Bel, Pl] interval and/or high conflict mass as
-speculative: the fused answer is not dependable yet. When flagged, the
-prompt injector builds a System 2 prompt asking what additional information
-would most reduce uncertainty. A model responder answers, the answer is
-appended as evidence, and fusion runs again until the interval/conflict
-contract from the OmegaConf YAML is satisfied or the iteration budget ends.
+speculative: the fused answer is not dependable yet. When flagged, System 1
+answers the LLM with a structured follow-up (clarifying question, summary,
+blocking assumptions) and that JSON itself is the transmitted message: a
+model responder answers it with a better response, the answer is appended
+as evidence, and fusion runs again until the interval/conflict contract
+from the OmegaConf YAML is satisfied or the iteration budget ends.
 
 This is a closed-world verifier: it only reasons over supplied evidence.
 Open-world evidence gathering (web fetch) is a later extension point.
@@ -13,13 +14,24 @@ Open-world evidence gathering (web fetch) is a later extension point.
 
 from __future__ import annotations
 
+import json
 import os
+import time
+import uuid
+from pathlib import Path
 from typing import Callable, Dict, FrozenSet, Mapping, Optional, Sequence
 
 from hydra import compose, initialize
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import DictConfig, OmegaConf
 
+from zydah.evidence import (
+    MODEL_FOLLOWUP,
+    ORIGINAL,
+    EvidenceChunk,
+    EvidenceLedger,
+    classify_independence,
+)
 from zydah.fusion import Mass
 from zydah.interface import FUSED_TAG, direct_verdict, fuse_response, fused_verdict
 from zydah.judges import extract_json_object, parse_mass_json
@@ -57,11 +69,21 @@ def make_mass_elicitor(template: str) -> MassElicitor:
     return elicitor
 
 
+def serialize_followup(followup: Mapping[str, object]) -> str:
+    """Serialize a follow-up payload exactly as transmitted to the LLM.
+
+    The JSON block is the message: a responder receives these bytes, so
+    artifacts and transcripts that show them show a sent call, not a
+    summary of one.
+    """
+    return json.dumps(followup, indent=2)
+
+
 def format_transcript(history: Sequence[Mapping[str, object]]) -> str:
     """Render follow-up cycles as Prompt_1/Response_1 pairs for streaming.
 
-    Only flagged iterations appear: each carries the System 2 prompt and,
-    when a responder answered, its response.
+    Only flagged iterations appear: each carries the transmitted follow-up
+    JSON and, when a responder answered, its response.
     """
     blocks = []
     n = 0
@@ -104,28 +126,6 @@ def _require(cfg: DictConfig, key: str) -> object:
     return value
 
 
-class PromptInjector:
-    """Builds the System 2 prompt when the validator flags uncertainty."""
-
-    def __init__(self, template: str, question: str, metric_format: str) -> None:
-        self.template = template
-        self.question = question
-        self.metric_format = metric_format
-
-    def build(self, *, evidence: str, zydah_verdict: Mapping[str, object]) -> str:
-        fmt = self.metric_format
-        return self.template.format(
-            evidence=evidence,
-            question=self.question,
-            verdict=zydah_verdict.get("verdict"),
-            decision=zydah_verdict.get("decision"),
-            bel=format(float(zydah_verdict.get("bel", 0.0)), fmt),
-            pl=format(float(zydah_verdict.get("pl", 0.0)), fmt),
-            width=format(float(zydah_verdict.get("width", 0.0)), fmt),
-            conflict=format(float(zydah_verdict.get("conflict", 0.0)), fmt),
-        )
-
-
 class ZydahVerifier:
     """Verify a fused verdict; ask System 2 for help while it is speculative.
 
@@ -142,20 +142,29 @@ class ZydahVerifier:
         config: Optional[object] = None,
         model_id: Optional[str] = None,
         mass_elicitor: Optional[MassElicitor] = None,
+        session_id: Optional[str] = None,
+        log_path: Optional[object] = None,
     ) -> None:
         self.frame = frozenset(frame)
         self.panel = panel
         self.responder = responder
         self.cfg = _coerce_config(config)
         self.model_id = self._resolve_model_id(model_id)
+        self.session_id = session_id
+        self._log_path = Path(log_path) if log_path else None
+        self._run_id = uuid.uuid4().hex
         self.mass_elicitor = mass_elicitor or make_mass_elicitor(
             str(_require(self.cfg, "direct_mass_prompt_template"))
         )
-        self.prompt_injector = PromptInjector(
-            template=str(_require(self.cfg, "prompt_template")),
-            question=str(_require(self.cfg, "question")),
-            metric_format=str(_require(self.cfg, "metric_format")),
-        )
+        self._question = str(_require(self.cfg, "question"))
+
+    def _log(self, event: Dict) -> None:
+        """Append one JSONL cycle record (no secrets; ids/metrics only)."""
+        if self._log_path is None:
+            return
+        record = {"run_id": self._run_id, "ts": time.time(), **event}
+        with open(self._log_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
 
     def _resolve_model_id(self, model_id: Optional[str]) -> str:
         if model_id:
@@ -184,12 +193,34 @@ class ZydahVerifier:
             "conflict_threshold": conflict_threshold,
         }
         if zydah_verdict.get("verdict") is None:
-            return {"verdict": False, "question": self.prompt_injector.question, **result}
+            return {"verdict": False, "question": self._question, **result}
         if width <= width_threshold and conflict <= conflict_threshold:
             return {"verdict": str(_require(self.cfg, "good_verdict")), **result}
-        return {"verdict": False, "question": self.prompt_injector.question, **result}
+        return {"verdict": False, "question": self._question, **result}
 
-    def verify(self, evidence: str, run: int = 0) -> Dict:
+    def followup_payload(
+        self,
+        validation: Mapping[str, object],
+        assumptions: Optional[Sequence[str]] = None,
+    ) -> Dict:
+        """System 1's structured response to the LLM when flagged.
+
+        This is the contract the LLM answers with a better response:
+        the clarifying ``question``, a ``summary`` of what to fix, and
+        the blocking ``assumptions``. Assumptions are caller-annotated
+        (e.g. "Springfield has no state qualifier") — System 1 surfaces
+        them, it does not invent them. No delivery status is attached:
+        whether it was answered is shown by the next turn, not a flag.
+        """
+        return {
+            "question": validation.get("question") or self._question,
+            "summary": str(_require(self.cfg, "followup_summary")),
+            "assumptions": [str(item) for item in (assumptions or [])],
+        }
+
+    def verify(
+        self, evidence: str, run: int = 0, assumptions: Optional[Sequence[str]] = None
+    ) -> Dict:
         """Fuse, validate, and iterate with System 2 while speculative.
 
         Each iteration appends the model answer to the evidence and re-runs
@@ -225,14 +256,15 @@ class ZydahVerifier:
                     "followups": followups,
                     "model_id": self.model_id,
                 }
-            prompt = self.prompt_injector.build(
-                evidence=current_evidence, zydah_verdict=zydah_verdict
-            )
+            followup = self.followup_payload(validation, assumptions)
+            prompt = serialize_followup(followup)  # transmitted to the LLM
             history[-1]["prompt"] = prompt
+            history[-1]["followup"] = followup
             if self.responder is None or followups >= max_iterations:
                 return {
                     "verdict": False,
                     "question": validation["question"],
+                    "followup": followup,
                     "prompt": prompt,
                     "result": result,
                     "history": history,
@@ -244,6 +276,7 @@ class ZydahVerifier:
                 return {
                     "verdict": False,
                     "question": validation["question"],
+                    "followup": followup,
                     "prompt": prompt,
                     "result": result,
                     "history": history,
@@ -255,14 +288,24 @@ class ZydahVerifier:
             current_evidence = f"{current_evidence}{prefix}{answer}"
             followups += 1
 
-    def verify_direct(self, evidence: str) -> Dict:
+    def _independence(self, first_session_id, followups: int) -> dict:
+        return classify_independence(first_session_id, self.session_id, followups)
+
+    def verify_direct(
+        self,
+        evidence: str,
+        first_response=None,
+        assumptions: Optional[Sequence[str]] = None,
+    ) -> Dict:
         """Transport + verifier only: bypass the judge panel.
 
         The model scores the evidence itself (one mass per call via
         ``mass_elicitor``); the validator judges that mass's interval.
-        Follow-ups use the same prompt-injector loop as ``verify``.
-        A single source has no inter-judge conflict, so conflict stays
-        0.0 and width carries the speculation signal.
+        When flagged, System 1 returns a structured ``followup`` for the
+        LLM to answer with a better response (see ``followup_payload``);
+        with a responder wired, that answer is appended as evidence and
+        re-judged. A single source has no inter-judge conflict, so
+        conflict stays 0.0 and width carries the speculation signal.
         """
         world = str(_require(self.cfg, "world"))
         if world != "closed":
@@ -270,11 +313,20 @@ class ZydahVerifier:
                 "open-world verification is not implemented; web fetch is a follow-up"
             )
         max_iterations = int(_require(self.cfg, "max_iterations"))
-        current_evidence = evidence
+        prefix = str(_require(self.cfg, "additional_info_prefix"))
+        first_session = getattr(first_response, "session_id", None)
+        first_playground = getattr(first_response, "playground", None)
+        ledger = EvidenceLedger()
+        ledger.add(
+            EvidenceChunk(ORIGINAL, evidence, session_id=first_session, playground=first_playground)
+        )
         history = []
         followups = 0
         while True:
-            mass = self.mass_elicitor(current_evidence, self.frame, self.model_id)
+            view_text = (
+                ledger.original_only() if followups == 0 else ledger.assisted(separator=prefix)
+            )
+            mass = self.mass_elicitor(view_text, self.frame, self.model_id)
             zydah_verdict = fused_verdict(
                 [mass],
                 self.frame,
@@ -288,6 +340,8 @@ class ZydahVerifier:
             validation = self.validate(zydah_verdict)
             history.append({"validation": validation, "zydah": zydah_verdict, "mass": mass})
             if validation["verdict"] is not False:
+                independence = self._independence(first_session, followups)
+                self._log({"event": "verify_direct", "verdict": validation["verdict"], "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict")})
                 return {
                     "verdict": validation["verdict"],
                     "result": result,
@@ -295,35 +349,55 @@ class ZydahVerifier:
                     "followups": followups,
                     "model_id": self.model_id,
                     "mode": "direct",
+                    "independence": independence,
+                    "ledger": ledger,
                 }
-            prompt = self.prompt_injector.build(
-                evidence=current_evidence, zydah_verdict=zydah_verdict
-            )
+            followup = self.followup_payload(validation, assumptions)
+            prompt = serialize_followup(followup)  # transmitted to the LLM
             history[-1]["prompt"] = prompt
+            history[-1]["followup"] = followup
             if self.responder is None or followups >= max_iterations:
+                independence = self._independence(first_session, followups)
+                self._log({"event": "verify_direct", "verdict": False, "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict")})
                 return {
                     "verdict": False,
                     "question": validation["question"],
+                    "followup": followup,
                     "prompt": prompt,
                     "result": result,
                     "history": history,
                     "followups": followups,
                     "model_id": self.model_id,
                     "mode": "direct",
+                    "independence": independence,
+                    "ledger": ledger,
                 }
             answer = self.responder(prompt, self.model_id)
             if not answer or not str(answer).strip():
+                independence = self._independence(first_session, followups)
+                self._log({"event": "verify_direct", "verdict": False, "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict")})
                 return {
                     "verdict": False,
                     "question": validation["question"],
+                    "followup": followup,
                     "prompt": prompt,
                     "result": result,
                     "history": history,
                     "followups": followups,
                     "model_id": self.model_id,
                     "mode": "direct",
+                    "independence": independence,
+                    "ledger": ledger,
                 }
             history[-1]["response"] = answer
-            prefix = str(_require(self.cfg, "additional_info_prefix"))
-            current_evidence = f"{current_evidence}{prefix}{answer}"
+            ledger.add(
+                EvidenceChunk(
+                    MODEL_FOLLOWUP,
+                    str(answer),
+                    session_id=self.session_id,
+                    model_id=self.model_id,
+                    playground="B",
+                    turn=followups + 1,
+                )
+            )
             followups += 1

@@ -147,6 +147,8 @@ Sync contract (for the future script, not yet built):
   and agent answers intercept into the verifier; underspecified prompts
   clarify first; high-stakes content intercepts with stricter thresholds.
   Today "hi" burns 3 follow-ups because nothing routes it away.
+  Partial: the session-isolation half landed in ZYDAH-110 (session rule,
+  provenance ledger); the prompt-type gate itself remains open.
 - Acceptance: taxonomy table implemented as a gate in front of
   `verify_direct`; greeting/command fixtures pass with zero model mass
   calls; claim fixtures still intercept.

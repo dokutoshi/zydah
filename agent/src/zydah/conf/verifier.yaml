@@ -6,12 +6,12 @@ conflict_threshold: 0.35
 tau: 0.80
 rule: yager
 world: closed
-max_iterations: 3
+max_iterations: 5
 
 good_verdict: good
 question: "Need more info, what question reduces uncertainty?"
+followup_summary: "Clarify the blocking assumption before relying on this response."
 additional_info_prefix: "\n\nAdditional information:\n"
-metric_format: ".4f"
 
 direct_mass_prompt_template: |
   You are an expert evaluator. Assess the evidence below against the
@@ -24,24 +24,8 @@ direct_mass_prompt_template: |
   Evidence:
   {evidence}
 
-prompt_template: |
-  You are System 2, the high-conflict reasoning step for Zydah.
-
-  Evidence under review:
-  {evidence}
-
-  The belief-fusion validator flagged this answer as speculative:
-  - verdict: {verdict}
-  - decision: {decision}
-  - Bel: {bel}
-  - Pl: {pl}
-  - interval width: {width}
-  - conflict mass: {conflict}
-
-  {question}
-
-  Answer with the additional information that most reduces uncertainty.
-  Stay within the closed world of the provided evidence; do not invent sources.
+# No follow-up prompt template: the follow-up JSON (question, summary,
+# assumptions from the keys above) is itself the message sent to the LLM.
 
 model:
   id: muse-spark
