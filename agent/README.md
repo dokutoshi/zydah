@@ -38,7 +38,7 @@ Conflict between judges is preserved as a signal, not normalized away.
 - Simultaneous n-ary combination (order-invariant by construction).
 
 No proprietary stabilization parameters. Defaults are simple and documented
-in [`zydah/fusion.py`](zydah/fusion.py).
+in [`src/zydah/fusion.py`](src/zydah/fusion.py).
 
 ## Judges (Meta models)
 
@@ -53,9 +53,11 @@ Never commit secrets. Unit tests use a seeded mock panel — no API calls.
 
 ## Layout
 
-- `zydah/fusion.py` — mass functions, Dempster / Yager / TBM, Bel, Pl, conflict K
-- `zydah/judges.py` — panel interface, JSON mass parsing, mock + Meta clients
-- `zydah/router.py` — interval-based decision + escalation policy
+- `src/zydah/fusion.py` — mass functions, Dempster / Yager / TBM, Bel, Pl, conflict K
+- `src/zydah/judges.py` — panel interface, JSON mass parsing, mock + Meta clients
+- `src/zydah/router.py` — interval-based decision + escalation policy
+- `src/zydah/interface.py` — [muse] direct / [zydah] fused pipe-through API
+- `src/zydah/verifier.py` — System 2 verifier loop (Hydra/OmegaConf YAML config)
 - `eval/harness.py` — majority vote vs. averaging vs. Dempster vs. Zydah
 - `tests/` — Zadeh's paradox, order invariance, sum-to-1 (no API calls)
 

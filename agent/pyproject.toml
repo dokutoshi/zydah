@@ -7,13 +7,14 @@ name = "zydah"
 version = "0.1.0"
 description = "Evidential belief fusion for agent evaluation (Dempster-Shafer, Yager, Smets TBM)"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["hydra-core>=1.3", "numpy>=2", "polars>=1"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["zydah"]
+packages = ["src/zydah"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src", "."]
