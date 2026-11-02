@@ -18,6 +18,10 @@ Muse Code reads this file as project rules when it runs in this directory.
 - `src/zydah/router.py` — interval decision + escalation
 - `src/zydah/interface.py` — [muse]/[zydah] pipe-through API
 - `src/zydah/verifier.py` — System 2 verifier loop, Hydra/OmegaConf config
+- `src/zydah/evidence.py` — provenance ledger, filtered views, session rule
 - `src/zydah/conf/verifier.yaml` — verifier hyperparameters (no magic numbers)
 - `eval/harness.py` — baselines comparison harness
-- `tests/` — pytest suite, no API calls
+- `tests/suite/` — component tests (fusion, matrix, router, interface, transport, judges/verifier panel path, evidence boundary, jira, harness)
+- `tests/direct/` — panel-bypass path only: `verify_direct` (transport + single elicitor + verifier, no judge panel)
+- `tests/levels/` — user-question scenarios (Simple weather/Springfield, Context-Independence comparisons)
+- `tests/conftest.py` — shared `outputs/{suite,direct,levels}/{test_name}/` plumbing

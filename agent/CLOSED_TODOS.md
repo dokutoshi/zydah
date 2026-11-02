@@ -3,6 +3,39 @@
 Finished work, newest first. `Jira:` fills in once the Cloud sync in
 `OPEN_TODOS.md` (ZYDAH-002) is wired; `-` means not yet synced.
 
+## ZYDAH-111 — Level tests: Simple vs Context-Independence
+
+- Status: done
+- Area: tests
+- Source: user question (tests per level?)
+- Jira: -
+- Closed: 2026-11-02
+- Details: `tests/test_levels.py` — Simple level: weather questions over
+  seeded-random states answered directly with zero follow-ups;
+  Springfield-without-state honestly returns a follow-up question.
+  Context-Independence level: car A vs car B comparisons earn
+  CONTEXT_INDEPENDENT across sessions and JOINT_CONTEXT in one session.
+- Verification: 6/6 level tests; full suite 91/91.
+
+## ZYDAH-110 — Evidence boundary: provenance ledger + session rule
+
+- Status: done
+- Area: evidence / verifier
+- Source: approved day2 plan (anti-eavesdropping; Playgrounds A/B)
+- Jira: -
+- Closed: 2026-11-02
+- Details: `src/zydah/evidence.py` adds provenance chunks (kind, model,
+  session, playground, turn), original-only vs assisted views, and
+  `classify_independence`: same session ⇒ JOINT_CONTEXT, follow-ups ⇒
+  ASSISTED, separate sessions + original-only ⇒ CONTEXT_INDEPENDENT.
+  `verify_direct` elicits from ledger views, records follow-ups as B
+  chunks, returns independence + ledger, and appends JSONL cycle logs
+  when `log_path` is set. `FirstResponse` carries session/playground,
+  rendered in sealed output. Mixed models deferred to Playgrounds.
+- Verification: `uv run pytest -q` → 85/85 pass (8 new tests in
+  `tests/test_evidence.py`: view hiding, session rule, A-prompt purity,
+  JSONL logging).
+
 ## ZYDAH-109 — Migrate environment to uv (closes ZYDAH-001)
 
 - Status: done

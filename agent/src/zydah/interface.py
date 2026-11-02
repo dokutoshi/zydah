@@ -53,6 +53,8 @@ class FirstResponse:
     model_id: str
     source: str
     verdict: Optional[str] = None
+    session_id: Optional[str] = None
+    playground: str = "A"
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,8 @@ def capture_first_response(
     model_id: str,
     direct: Optional[Mapping[str, object]] = None,
     source: str = MODEL_ENDPOINT_SOURCE,
+    session_id: Optional[str] = None,
+    playground: str = "A",
 ) -> FirstResponse:
     """Freeze endpoint text before any verifier output exists.
 
@@ -86,7 +90,14 @@ def capture_first_response(
     verdict = direct.get("verdict") if direct is not None else None
     if verdict is not None and not isinstance(verdict, str):
         raise TypeError("direct verdicts must be strings or None")
-    return FirstResponse(text=text, model_id=model_id, source=source, verdict=verdict)
+    return FirstResponse(
+        text=text,
+        model_id=model_id,
+        source=source,
+        verdict=verdict,
+        session_id=session_id,
+        playground=playground,
+    )
 
 
 def seal_cycle(first: FirstResponse, verification: Mapping[str, object]) -> AttributedCycle:
@@ -121,6 +132,9 @@ def format_attributed_cycle(cycle: AttributedCycle) -> str:
     zydah = cycle.zydah
     verification = cycle.verification
     provenance = f"(first response, direct; model={muse.model_id}; source={muse.source}"
+    provenance += f"; playground={muse.playground}"
+    if muse.session_id is not None:
+        provenance += f"; session={muse.session_id}"
     if muse.verdict is not None:
         provenance += f"; direct verdict={muse.verdict}"
     provenance += ")"
