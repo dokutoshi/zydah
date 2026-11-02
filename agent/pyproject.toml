@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zydah"
+version = "0.1.0"
+description = "Evidential belief fusion for agent evaluation (Dempster-Shafer, Yager, Smets TBM)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["zydah"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
