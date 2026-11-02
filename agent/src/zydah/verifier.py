@@ -57,6 +57,24 @@ def make_mass_elicitor(template: str) -> MassElicitor:
     return elicitor
 
 
+def format_transcript(history: Sequence[Mapping[str, object]]) -> str:
+    """Render follow-up cycles as Prompt_1/Response_1 pairs for streaming.
+
+    Only flagged iterations appear: each carries the System 2 prompt and,
+    when a responder answered, its response.
+    """
+    blocks = []
+    n = 0
+    for entry in history:
+        if "prompt" not in entry:
+            continue
+        n += 1
+        blocks.append(f"[Prompt {n}]\n{entry['prompt']}")
+        if entry.get("response"):
+            blocks.append(f"[Response {n}]\n{entry['response']}")
+    return "\n\n".join(blocks)
+
+
 def load_verifier_config(overrides: Optional[Sequence[str]] = None) -> DictConfig:
     """Load verifier hyperparameters from ``conf/verifier.yaml`` via Hydra.
 
@@ -210,6 +228,7 @@ class ZydahVerifier:
             prompt = self.prompt_injector.build(
                 evidence=current_evidence, zydah_verdict=zydah_verdict
             )
+            history[-1]["prompt"] = prompt
             if self.responder is None or followups >= max_iterations:
                 return {
                     "verdict": False,
@@ -231,6 +250,7 @@ class ZydahVerifier:
                     "followups": followups,
                     "model_id": self.model_id,
                 }
+            history[-1]["response"] = answer
             prefix = str(_require(self.cfg, "additional_info_prefix"))
             current_evidence = f"{current_evidence}{prefix}{answer}"
             followups += 1
@@ -279,6 +299,7 @@ class ZydahVerifier:
             prompt = self.prompt_injector.build(
                 evidence=current_evidence, zydah_verdict=zydah_verdict
             )
+            history[-1]["prompt"] = prompt
             if self.responder is None or followups >= max_iterations:
                 return {
                     "verdict": False,
@@ -302,6 +323,7 @@ class ZydahVerifier:
                     "model_id": self.model_id,
                     "mode": "direct",
                 }
+            history[-1]["response"] = answer
             prefix = str(_require(self.cfg, "additional_info_prefix"))
             current_evidence = f"{current_evidence}{prefix}{answer}"
             followups += 1

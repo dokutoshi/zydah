@@ -12,20 +12,6 @@ Sync contract (for the future script, not yet built):
 - `Jira:` is `-` until synced, then the Cloud issue key (e.g. `ABC-123`).
 - Secrets come only from environment variables; never paste keys here.
 
-## ZYDAH-001 — Decide uv vs pixi and add lockfile
-
-- Status: open
-- Priority: high
-- Area: packaging
-- Source: user request (future package additions)
-- Jira: -
-- Updated: 2026-11-02
-- Details: repo currently uses `python3 -m venv .venv` + `pip install -e
-  ".[dev]"` with no lockfile (`pyproject.toml` pins nothing). Pick one
-  manager, add its lockfile, and update `README.md` quickstart and
-  `AGENTS.md` common commands.
-- Acceptance: clean-clone install reproduces the environment from the
-  lockfile; `pytest` passes under the new flow.
 
 ## ZYDAH-002 — Wire Jira Cloud sync for todo files
 
@@ -73,7 +59,6 @@ Sync contract (for the future script, not yet built):
   router never sees it. Decide if `tau`-straddle is sufficient or if K /
   width thresholds belong in the decision, then implement or record why not.
 - Acceptance: decision recorded; router and README agree; tests updated.
-
 
 ## ZYDAH-006 — Verify Baseten Spark Open path
 
@@ -129,3 +114,39 @@ Sync contract (for the future script, not yet built):
 - Acceptance: open mode fetches for the flagged question, cites sources,
   and iterates like the closed loop; tests use fixtures, no live calls.
 
+## ZYDAH-011 — Structured logging + prompt/response-weighted mass assignment
+
+- Status: open
+- Priority: high
+- Area: logging / verifier
+- Source: user hypothesis (prompt + response determine follow-up need)
+- Jira: -
+- Updated: 2026-11-02
+- Details: hypothesis — mass assignment improves when the model weighs a
+  response in context, not an isolated claim. Today `verify_direct` asks
+  for mass on a bare claim and the model returns all-Ω (width 1.0), so
+  follow-ups never converge. Two parts: (1) structured logging per cycle
+  — original prompt, model response, elicited mass, Bel/Pl/width/conflict,
+  validator output, follow-up prompt/response, model IDs, timings;
+  (2) feed prompt+response (not claim alone) into mass elicitation, and
+  let the validator decide follow-ups from that pair.
+- Acceptance: JSONL logs per verify run; test shows prompt+response input
+  commits mass where claim-only input returned all-Ω.
+
+## ZYDAH-012 — Prompt taxonomy and pass/intercept routing gate
+
+- Status: open
+- Priority: high
+- Area: routing / verifier
+- Source: user insight (a greeting is not a pass/partial/fail claim)
+- Jira: -
+- Updated: 2026-11-02
+- Details: the {pass, partial, fail} frame only fits evaluative claims.
+  A routing gate should classify input before fusion: greeting/smalltalk
+  and plain commands pass through untouched; checkable factual claims
+  and agent answers intercept into the verifier; underspecified prompts
+  clarify first; high-stakes content intercepts with stricter thresholds.
+  Today "hi" burns 3 follow-ups because nothing routes it away.
+- Acceptance: taxonomy table implemented as a gate in front of
+  `verify_direct`; greeting/command fixtures pass with zero model mass
+  calls; claim fixtures still intercept.

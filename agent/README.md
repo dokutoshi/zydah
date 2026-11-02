@@ -68,8 +68,6 @@ Majority vote, score averaging, and multi-judge "juries" (Verga et al., 2024).
 ## Quickstart
 
 ```
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
+uv sync --extra dev
+uv run pytest
 ```

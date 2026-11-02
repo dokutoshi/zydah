@@ -9,7 +9,7 @@ Muse Code reads this file as project rules when it runs in this directory.
 
 ## Common Commands
 
-- `source .venv/bin/activate; pip install -e ".[dev]"; pytest`
+- `uv sync --extra dev; uv run pytest` (uv manages `.venv`; do not use pip/venv)
 
 ## Project Layout
 

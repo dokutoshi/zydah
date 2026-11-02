@@ -3,6 +3,20 @@
 Finished work, newest first. `Jira:` fills in once the Cloud sync in
 `OPEN_TODOS.md` (ZYDAH-002) is wired; `-` means not yet synced.
 
+## ZYDAH-109 — Migrate environment to uv (closes ZYDAH-001)
+
+- Status: done
+- Area: packaging
+- Source: user direction ("prefer uv over .venv and pip")
+- Jira: -
+- Closed: 2026-11-02
+- Details: uv 0.13.6 installed; `uv sync --extra dev` created `uv.lock`
+  and a uv-managed `.venv` (old pip venv removed). README quickstart and
+  AGENTS.md common commands now use `uv sync` / `uv run pytest`.
+  Sandbox note: uv cache needed `UV_CACHE_DIR=/tmp/uv-cache` inside the
+  agent sandbox; unrestricted shells use the default cache.
+- Verification: `uv run pytest -q` → 72/72 pass; `uv.lock` present.
+
 ## ZYDAH-108 — Vectorized matrix fusion (numpy/polars)
 
 - Status: done

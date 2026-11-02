@@ -3,7 +3,7 @@
 import pytest
 
 from zydah.fusion import make_mass
-from zydah.verifier import ZydahVerifier, load_verifier_config
+from zydah.verifier import ZydahVerifier, format_transcript, load_verifier_config
 
 FRAME = frozenset({"pass", "partial", "fail"})
 OMEGA = ("pass", "partial", "fail")
@@ -143,6 +143,26 @@ def test_verify_direct_iterates_with_responder_to_good():
     assert out["followups"] == 1
     assert elicitor.calls == 2
     assert "Ohio" in seen["prompt"]
+
+
+def test_transcript_renders_prompt_response_pairs():
+    def responder(prompt, model_id):
+        return "Extra evidence for pass."
+
+    elicitor = SequenceElicitor([wide_mass(), wide_mass(), narrow_mass()])
+    verifier = ZydahVerifier(FRAME, responder=responder, mass_elicitor=elicitor)
+    out = verifier.verify_direct("claim")
+    assert out["verdict"] == "good"
+    transcript = format_transcript(out["history"])
+    assert "[Prompt 1]" in transcript and "[Response 1]" in transcript
+    assert "[Prompt 2]" in transcript and "[Response 2]" in transcript
+    assert "[Prompt 3]" not in transcript  # final pass was good
+
+
+def test_transcript_empty_without_followups():
+    verifier = ZydahVerifier(FRAME, mass_elicitor=SequenceElicitor([narrow_mass()]))
+    out = verifier.verify_direct("claim")
+    assert format_transcript(out["history"]) == ""
 
 
 def test_verify_direct_no_responder_returns_prompt():
