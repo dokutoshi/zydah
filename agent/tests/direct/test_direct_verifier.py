@@ -183,7 +183,19 @@ def test_unresolved_graph_generates_partition_question_for_human():
     assert MODEL_FOLLOWUP not in [c.kind for c in out["ledger"].chunks]
 
 
-def _paused_springfield(sent, human_answer=None):
+class FakeSimilarityScorer:
+    """Deterministic encoder stand-in: one fixed score per call."""
+
+    def __init__(self, value):
+        self.value = value
+        self.calls = []
+
+    def similarities(self, text, candidates):
+        self.calls.append((text, list(candidates)))
+        return [self.value for _ in candidates]
+
+
+def _paused_springfield(sent, human_answer=None, similarity_scorer=None):
     """Drive verify_direct to an agent_unresolved pause; record prompts."""
 
     def responder(prompt, model_id):
@@ -199,6 +211,7 @@ def _paused_springfield(sent, human_answer=None):
         graph_resolver=NumpyResolver(),
         graph_factory=lambda evidence: build_place_graph(),
         session_id="s-b",
+        similarity_scorer=similarity_scorer,
     )
     first = capture_first_response(
         text="It is cloudy in Springfield today.",
@@ -238,19 +251,13 @@ def test_choice_b_sends_north_to_model_and_reelicits():
                 "Springfield, OH",
                 "Springfield, OR",
             ],
-            "candidate_scores": pytest.approx(
-                {
-                    "Springfield, IL": 0.25,
-                    "Springfield, MA": 0.25,
-                    "Springfield, OH": 0.25,
-                    "Springfield, OR": 0.25,
-                }
-            ),
-            "candidate_intervals": {
-                "Springfield, IL": [0.0, 1.0],
-                "Springfield, MA": [0.0, 1.0],
-                "Springfield, OH": [0.0, 1.0],
-                "Springfield, OR": [0.0, 1.0],
+            # (A, ~A, Omega) per candidate: mass sits on the 4-member
+            # focal set, so no singleton is committed either way.
+            "candidate_beliefs": {
+                "Springfield, IL": {"A": 0.0, "not_A": 0.0, "omega": 1.0},
+                "Springfield, MA": {"A": 0.0, "not_A": 0.0, "omega": 1.0},
+                "Springfield, OH": {"A": 0.0, "not_A": 0.0, "omega": 1.0},
+                "Springfield, OR": {"A": 0.0, "not_A": 0.0, "omega": 1.0},
             },
             "offered_choices": [],
             "relationship_questions": {},
@@ -318,12 +325,9 @@ def test_model_question_continues_to_candidate_choices(output_dir):
     payload = json.loads(sent[-1])
     assert payload["human_choice"] == {"key": "B", "value": "Springfield, MA"}
     assert payload["context"]["candidates"] == ["Springfield, MA"]
-    assert payload["context"]["candidate_scores"] == pytest.approx(
-        {"Springfield, MA": 1.0}
-    )
-    assert payload["context"]["candidate_intervals"]["Springfield, MA"] == (
-        pytest.approx([1.0, 1.0])
-    )
+    assert payload["context"]["candidate_beliefs"] == {
+        "Springfield, MA": {"A": 1.0, "not_A": 0.0, "omega": 0.0}
+    }
     assert round2["verdict"] == "good"
     artifact = {
         "evidence": "claim",
@@ -438,10 +442,24 @@ def test_relationship_answer_conditions_massachusetts(output_dir):
     assert resumed["verdict"] == "good"
     conditioning = resumed["graph_conditioning"]
     assert conditioning["support"] == ["Springfield, MA"]
-    scores = conditioning["candidate_scores"]
-    assert scores["Springfield, MA"] > scores["Springfield, IL"]
-    bel, pl = conditioning["candidate_intervals"]["Springfield, MA"]
-    assert bel > 0.0 and pl >= bel
+    # The stored value is the belief frame itself: discounted mass on
+    # the MA focal element, residual on Omega.
+    frame_value = conditioning["belief_frame"]
+    assert "Springfield, MA" in frame_value["frame"]
+    assert frame_value["mass"] == pytest.approx(
+        {"Springfield, MA": 0.75, "Omega": 0.25}
+    )
+    beliefs = conditioning["candidate_beliefs"]
+    assert beliefs["Springfield, MA"] == {
+        "A": 0.75,
+        "not_A": 0.0,
+        "omega": 0.25,
+    }
+    assert beliefs["Springfield, IL"] == {
+        "A": 0.0,
+        "not_A": 0.75,
+        "omega": 0.25,
+    }
     graph_chunks = [
         chunk.text
         for chunk in resumed["ledger"].chunks
@@ -489,8 +507,8 @@ def test_live_style_relationship_answer_conditions_only_massachusetts():
     conditioning = resumed["graph_conditioning"]
     assert conditioning["support"] == ["Springfield, MA"]
     assert (
-        conditioning["candidate_scores"]["Springfield, MA"]
-        > conditioning["candidate_scores"]["Springfield, IL"]
+        conditioning["candidate_beliefs"]["Springfield, MA"]["A"]
+        > conditioning["candidate_beliefs"]["Springfield, IL"]["A"]
     )
 
 
@@ -538,6 +556,80 @@ def test_enumeration_of_candidates_is_not_relationship_support():
     )
     assert "graph_conditioning" not in resumed
     assert resumed["needs_human"] is True
+
+
+def test_balanced_markers_affirmative_counterparts_condition():
+    # New affirmative family: existence/connection phrasing, not just
+    # the location verbs the original list had.
+    sent = []
+    verifier, out = _paused_springfield(
+        sent,
+        human_answer=(
+            "Springfield, MA: It has a direct relationship - the "
+            "Celtics are connected to Massachusetts, the home-state "
+            "team for Springfield."
+        ),
+    )
+    resumed = verifier.resume_direct(
+        out, "E", other_text="the celtics are a good team"
+    )
+    assert resumed["graph_conditioning"]["support"] == [
+        "Springfield, MA"
+    ]
+
+
+def test_balanced_markers_negative_counterparts_block():
+    # New negative family: negated location verbs must block support
+    # even when the state name is mentioned.
+    sent = []
+    verifier, out = _paused_springfield(
+        sent,
+        human_answer=(
+            "Springfield, MA: The Celtics are not based in "
+            "Massachusetts and have no tie to Springfield."
+        ),
+    )
+    resumed = verifier.resume_direct(
+        out, "E", other_text="the celtics are a good team"
+    )
+    assert "graph_conditioning" not in resumed
+
+
+def test_encoder_cross_check_keeps_support_above_threshold():
+    scorer = FakeSimilarityScorer(0.9)
+    sent = []
+    verifier, out = _paused_springfield(
+        sent,
+        human_answer=(
+            "The Celtics are Boston's NBA team; Boston and Springfield "
+            "are both in Massachusetts."
+        ),
+        similarity_scorer=scorer,
+    )
+    resumed = verifier.resume_direct(
+        out, "E", other_text="the celtics are a good team"
+    )
+    conditioning = resumed["graph_conditioning"]
+    assert conditioning["support"] == ["Springfield, MA"]
+    assert conditioning["similarity_scores"] == {"Springfield, MA": 0.9}
+    assert scorer.calls and "Massachusetts" in scorer.calls[0][1][0]
+
+
+def test_encoder_cross_check_drops_support_below_threshold():
+    scorer = FakeSimilarityScorer(0.1)
+    sent = []
+    verifier, out = _paused_springfield(
+        sent,
+        human_answer=(
+            "The Celtics are Boston's NBA team; Boston and Springfield "
+            "are both in Massachusetts."
+        ),
+        similarity_scorer=scorer,
+    )
+    resumed = verifier.resume_direct(
+        out, "E", other_text="the celtics are a good team"
+    )
+    assert "graph_conditioning" not in resumed
 
 
 def test_candidate_choices_cover_eight_candidates_plus_other():

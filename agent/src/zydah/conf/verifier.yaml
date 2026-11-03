@@ -17,8 +17,16 @@ additional_info_prefix: "\n\nAdditional information:\n"
 human_question_markers: ["which", "could you", "can you", "please specify", "please clarify", "do you mean"]
 human_question_template: "Which of these applies?\n{options}"
 relationship_question_template: "How does '{clue}' relate to {candidate}? Identify any city, state, or regional relationship, or say there is none."
-relationship_negative_markers: ["unrelated", "no relation", "no relationship", "no direct relationship", "no city, state, or regional relationship", "no city/state/regional relationship", "none.", "has no", "not related", "does not help", "doesn't help", "no connection"]
-relationship_affirmative_markers: ["yes", "direct state", "same state", "shares a state", "share a state", "plays in", "play in", "located in", "based in", "home to"]
+# Paired marker families: each negation of a relationship claim has
+# its affirmative counterpart, so a section is judged by the same
+# vocabulary on both sides (verdict, existence, location, relevance).
+relationship_negative_markers: ["none.", "none direct", "has no", "unrelated", "not related", "no relation", "no relationship", "no direct relationship", "no connection", "no tie", "no city, state, or", "no city/state/regional relationship", "not based in", "not located in", "does not play in", "doesn't play in", "not home to", "does not help", "doesn't help"]
+relationship_affirmative_markers: ["yes", "direct state", "has a relationship", "direct relationship", "regional relationship", "related to", "connected to", "connection to", "tie to", "same state", "shares a state", "share a state", "same region", "home-state", "based in", "located in", "plays in", "play in", "home to", "helps"]
+# Encoder cross-check on literally-parsed relationship support: the
+# candidate's relationship summary must sit at/above this cosine
+# similarity to the candidate descriptor (label + state name).
+similarity_model: sentence-transformers/all-MiniLM-L6-v2
+similarity_threshold: 0.25
 
 direct_mass_prompt_template: |
   You are an expert evaluator. Assess the evidence below against the

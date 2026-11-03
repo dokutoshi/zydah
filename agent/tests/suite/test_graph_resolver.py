@@ -56,6 +56,10 @@ def test_no_context_intervals_are_vacuous_not_uniform_belief():
         assert bel == pytest.approx(0.0)
         assert pl == pytest.approx(1.0)
         assert res.candidate_scores[cid] == pytest.approx(0.125)
+        # (A, ~A, Omega): nothing committed for or against, all
+        # uncommitted. The triple always sums to 1.
+        a, not_a, omega = res.candidate_beliefs[cid]
+        assert (a, not_a, omega) == pytest.approx((0.0, 0.0, 1.0))
 
 
 def test_conditioning_on_partition_redistributes_weights():

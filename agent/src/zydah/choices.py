@@ -82,8 +82,11 @@ class HumanChoiceContext(BaseModel):
 
     partition: str
     candidates: List[str] = Field(default_factory=list)
-    candidate_scores: Dict[str, float] = Field(default_factory=dict)
-    candidate_intervals: Dict[str, List[float]] = Field(default_factory=dict)
+    # Per candidate the (A, ~A, Omega) tuple rendered as labeled keys:
+    # mass committed to A, mass committed against A, uncommitted mass.
+    candidate_beliefs: Dict[str, Dict[str, float]] = Field(
+        default_factory=dict
+    )
     offered_choices: List[str] = Field(default_factory=list)
     relationship_questions: Dict[str, str] = Field(default_factory=dict)
     question: Optional[str] = None

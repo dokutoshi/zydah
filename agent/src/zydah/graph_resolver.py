@@ -65,6 +65,10 @@ class Resolution:
     best_partition: Optional[str] = None
     candidate_intervals: Mapping[str, tuple] = field(default_factory=dict)
     pignistic_scores: Mapping[str, float] = field(default_factory=dict)
+    # Per candidate the (A, ~A, Omega) decomposition of the unit mass:
+    # Bel(A), Bel(complement of A), and the uncommitted remainder.
+    # The three always sum to 1; a scalar score cannot express this.
+    candidate_beliefs: Mapping[str, tuple] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -139,6 +143,14 @@ class NumpyResolver:
             )
             for cid in ids
         }
+        beliefs = {
+            cid: (
+                intervals[cid][0],
+                belief(mass, frame - {cid}),
+                intervals[cid][1] - intervals[cid][0],
+            )
+            for cid in ids
+        }
         groups = members or {}
         partition_scores = {
             pid: float(sum(betp[cid] for cid in group if cid in betp))
@@ -181,6 +193,7 @@ class NumpyResolver:
             status=status,
             best_partition=best_partition,
             candidate_intervals=intervals,
+            candidate_beliefs=beliefs,
             pignistic_scores={cid: float(betp[cid]) for cid in ids},
         )
 

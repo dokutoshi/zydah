@@ -14,7 +14,7 @@ import random
 
 import pytest
 
-from zydah.fusion import make_mass
+from zydah.fusion import belief_frame, make_mass
 from zydah.graph import build_place_graph
 from zydah.graph_resolver import NumpyResolver
 from zydah.interface import capture_first_response, direct_verdict
@@ -103,7 +103,7 @@ def cycle_record(out, *, question, response_text):
             "turn": idx,
             "question": question if idx == 1 else prev_validation.get("question"),
             "response": response_text if idx == 1 else (prev.get("response") if prev else None),
-            "pignistic": zydah.get("pignistic", {}),
+            "belief_frame": belief_frame(entry["mass"], FRAME),
             "evaluation": {
                 "direct": direct_verdict([entry["mass"]], FRAME),
                 "zydah": zydah,
@@ -240,7 +240,7 @@ def live_cycle_record(out, *, question, response_text, cfg):
         zydah = entry["zydah"]
         turn = {
             "turn": idx,
-            "pignistic": zydah.get("pignistic", {}),
+            "belief_frame": belief_frame(entry["mass"], FRAME),
             "width": zydah.get("width"),
             "evaluation": {
                 "direct": direct_verdict([entry["mass"]], FRAME),
@@ -474,6 +474,11 @@ def test_live_other_clue_through_zydah(output_dir):
     verifier.responder = recording_live_responder
     verifier.mass_elicitor = make_mass_elicitor(
         str(verifier.cfg.direct_mass_prompt_template)
+    )
+    from zydah.similarity import SentenceTransformerScorer
+
+    verifier.similarity_scorer = SentenceTransformerScorer(
+        str(verifier.cfg.similarity_model)
     )
     resumed = verifier.resume_direct(
         paused, "E", other_text="the celtics are a good team"

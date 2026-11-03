@@ -42,7 +42,7 @@ from zydah.evidence import (
     EvidenceLedger,
     classify_independence,
 )
-from zydah.fusion import Mass
+from zydah.fusion import Mass, belief_frame
 from zydah.interface import FUSED_TAG, direct_verdict, fuse_response, fused_verdict
 from zydah.judges import extract_json_object, parse_mass_json
 from zydah.transport import chat_complete
@@ -169,12 +169,16 @@ class ZydahVerifier:
         log_path: Optional[object] = None,
         graph_resolver: Optional[object] = None,
         graph_factory: Optional[Callable[[str], object]] = None,
+        similarity_scorer: Optional[object] = None,
     ) -> None:
         self.frame = frozenset(frame)
         self.panel = panel
         self.responder = responder
         self.graph_resolver = graph_resolver
         self.graph_factory = graph_factory
+        # Optional encoder cross-check (zydah.similarity); None keeps
+        # conditioning purely literal and the offline suite weight-free.
+        self.similarity_scorer = similarity_scorer
         self.cfg = _coerce_config(config)
         self.model_id = self._resolve_model_id(model_id)
         self.session_id = session_id
@@ -481,6 +485,19 @@ class ZydahVerifier:
             alpha=float(alpha) if alpha is not None else 1.0,
         )
 
+    @staticmethod
+    def _beliefs_by_label(resolution: object, labels: Mapping[str, str]) -> Dict:
+        """Per-candidate (A, ~A, Omega) tuples keyed by display label."""
+        return {
+            labels[cid]: {
+                "A": float(triple[0]),
+                "not_A": float(triple[1]),
+                "omega": float(triple[2]),
+            }
+            for cid, triple in resolution.candidate_beliefs.items()  # type: ignore[attr-defined]
+            if cid in labels
+        }
+
     def _choice_context(
         self, previous: Mapping[str, object], partition_value: str
     ) -> HumanChoiceContext:
@@ -523,16 +540,9 @@ class ZydahVerifier:
                 conditioned = self._condition_resolution(
                     resolution, {candidate_node.id}
                 )
-                context.candidate_scores = {
-                    candidate_node.label: float(
-                        conditioned.candidate_scores[candidate_node.id]
-                    )
-                }
-                context.candidate_intervals = {
-                    candidate_node.label: list(
-                        conditioned.candidate_intervals[candidate_node.id]
-                    )
-                }
+                context.candidate_beliefs = self._beliefs_by_label(
+                    conditioned, {candidate_node.id: candidate_node.label}
+                )
             return context
         member_ids = [
             edge.source
@@ -543,16 +553,10 @@ class ZydahVerifier:
         context.candidates = [labels[cid] for cid in member_ids if cid in labels]
         resolution = self.graph_resolver.resolve(graph)  # type: ignore[attr-defined]
         conditioned = self._condition_resolution(resolution, set(member_ids))
-        context.candidate_scores = {
-            labels[cid]: float(conditioned.candidate_scores.get(cid, 0.0))
-            for cid in member_ids
-            if cid in labels
-        }
-        context.candidate_intervals = {
-            labels[cid]: list(conditioned.candidate_intervals.get(cid, (0.0, 1.0)))
-            for cid in member_ids
-            if cid in labels
-        }
+        context.candidate_beliefs = self._beliefs_by_label(
+            conditioned,
+            {cid: labels[cid] for cid in member_ids if cid in labels},
+        )
         return context
 
     def _other_context(
@@ -579,12 +583,9 @@ class ZydahVerifier:
         candidate_like = [value for value in offered if ", " in value]
         if candidate_like:
             context.candidates = candidate_like
-            share = 1.0 / len(candidate_like)
-            context.candidate_scores = {
-                label: share for label in candidate_like
-            }
-            context.candidate_intervals = {
-                label: [0.0, 1.0] for label in candidate_like
+            context.candidate_beliefs = {
+                label: {"A": 0.0, "not_A": 0.0, "omega": 1.0}
+                for label in candidate_like
             }
             self._add_relationship_questions(context, clue_text)
             return context
@@ -597,16 +598,9 @@ class ZydahVerifier:
                 node.label for node in graph.nodes_of_kind("candidate")  # type: ignore[attr-defined]
             ]
             resolution = self.graph_resolver.resolve(graph)  # type: ignore[attr-defined]
-            context.candidate_scores = {
-                labels[cid]: float(score)
-                for cid, score in resolution.candidate_scores.items()
-                if cid in labels
-            }
-            context.candidate_intervals = {
-                labels[cid]: list(interval)
-                for cid, interval in resolution.candidate_intervals.items()
-                if cid in labels
-            }
+            context.candidate_beliefs = self._beliefs_by_label(
+                resolution, labels
+            )
         self._add_relationship_questions(context, clue_text)
         return context
 
@@ -698,6 +692,7 @@ class ZydahVerifier:
         nodes = list(graph.nodes_of_kind("candidate"))  # type: ignore[attr-defined]
         labels: Dict[str, str] = {}
         support: List[str] = []
+        sections: Dict[str, str] = {}
         # Per-candidate sections (the live answer shape): each
         # candidate's own section decides its support, so negated
         # mentions of other states never leak into this candidate.
@@ -725,12 +720,20 @@ class ZydahVerifier:
                     else len(text)
                 )
                 body = text[end:seg_end]
-                if is_negative(body) or not (
-                    is_affirmative(body) or mentions(node, body)
+                # A section opening with "None" is a negative verdict
+                # for that candidate, whatever follows the word.
+                opens_negative = re.match(
+                    r"[^a-z]*none\b", body.strip().lower()
+                )
+                if (
+                    opens_negative
+                    or is_negative(body)
+                    or not (is_affirmative(body) or mentions(node, body))
                 ):
                     continue
                 support.append(node.id)
                 labels[node.id] = node.label
+                sections[node.id] = body.strip()
         else:
             # Free-form answer: judge each clause separately.
             clauses = [
@@ -757,16 +760,47 @@ class ZydahVerifier:
                         or node.label.lower() in lowered
                     )
 
-                if any(
-                    mentions(node, clause)
+                matched_clauses = [
+                    clause
+                    for clause in evidence_clauses
+                    if mentions(node, clause)
                     and not is_negative(clause)
                     and (is_affirmative(clause) or spelled_mention(clause))
-                    for clause in evidence_clauses
-                ):
+                ]
+                if matched_clauses:
                     support.append(node.id)
                     labels[node.id] = node.label
+                    sections[node.id] = " ".join(
+                        clause.strip() for clause in matched_clauses
+                    )
         if not support:
             return None
+        similarity_scores = None
+        if self.similarity_scorer is not None:
+            # Encoder cross-check: each proposed candidate's own
+            # relationship summary must sit close to that candidate's
+            # descriptor, or the literal proposal is dropped.
+            threshold = float(_require(self.cfg, "similarity_threshold"))
+            descriptors = {
+                node.id: (
+                    f"{node.label} "
+                    f"({node.features.get('state_name', '')})"
+                )
+                for node in nodes
+            }
+            similarity_scores = {}
+            kept: List[str] = []
+            for cid in support:
+                similarity = self.similarity_scorer.similarities(  # type: ignore[attr-defined]
+                    sections.get(cid, text), [descriptors[cid]]
+                )[0]
+                similarity_scores[labels[cid]] = float(similarity)
+                if similarity >= threshold:
+                    kept.append(cid)
+            support = kept
+            labels = {cid: labels[cid] for cid in support}
+            if not support:
+                return None
         all_labels = {
             node.id: node.label
             for node in graph.nodes_of_kind("candidate")  # type: ignore[attr-defined]
@@ -775,25 +809,27 @@ class ZydahVerifier:
         conditioned = self._condition_resolution(
             resolution, set(support), alpha_key="conditioning_alpha"
         )
-        return {
+        label_mass = {
+            frozenset(all_labels[cid] for cid in focal): float(value)
+            for focal, value in conditioned.mass.items()
+        }
+        result = {
             "support": [labels[cid] for cid in support],
-            "candidate_scores": {
-                all_labels[cid]: float(
-                    conditioned.candidate_scores.get(cid, 0.0)
-                )
-                for cid in all_labels
-            },
-            "candidate_intervals": {
-                all_labels[cid]: list(
-                    conditioned.candidate_intervals.get(cid, (0.0, 1.0))
-                )
-                for cid in all_labels
-            },
+            "belief_frame": belief_frame(
+                label_mass,
+                frozenset(all_labels.values()),
+            ),
+            "candidate_beliefs": self._beliefs_by_label(
+                conditioned, all_labels
+            ),
             "text": (
                 "Conditioned on model relationship answer: "
                 f"{self._resolution_text(conditioned)}"
             ),
         }
+        if similarity_scores is not None:
+            result["similarity_scores"] = similarity_scores
+        return result
 
     def resume_direct(
         self,

@@ -3,6 +3,26 @@
 Finished work, newest first. `Jira:` fills in once the Cloud sync in
 `OPEN_TODOS.md` (ZYDAH-002) is wired; `-` means not yet synced.
 
+## ZYDAH-112 — Probe GNN framework on this machine (PyTorch/MPS via uv)
+
+- Status: done
+- Area: graph / tooling
+- Source: user direction (Apple Metal PyTorch page; install with uv)
+- Jira: ZYDAH-10
+- Closed: 2026-11-03
+- Details: probed in isolated uv envs: torch 2.15.0 installs on Python
+  3.15 but torch-geometric 2.8.1 crashes constructing `GATConv` there,
+  so PyG needs the pinned Python 3.12 graph environment (forward pass
+  OK on CPU, output shape (3, 4)); DGL not needed. Installed as the
+  optional `graph` group (`uv add --optional graph`); the core install
+  stays numpy/polars. `src/zydah/conf/graph.yaml` created with
+  device/model/training/calibration hyperparameters; device policy is
+  `auto` (MPS when available, else CPU). MPS reported False in the
+  sandboxed session — re-check on an unsandboxed run remains open.
+- Verification: `GATConv` forward pass re-verified in the project
+  `.venv` (shape (3, 4)); full `uv run pytest -q` → 126 passed,
+  3 skipped.
+
 ## ZYDAH-115 — Route follow-up answers: [human] terminal vs [agent] resolution
 
 - Status: done

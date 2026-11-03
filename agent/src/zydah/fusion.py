@@ -224,3 +224,26 @@ def pignistic(mass: Mass, frame: FrozenSet[str]) -> Dict[str, float]:
         for w in focal:
             betp[w] += share
     return betp
+
+
+def belief_frame(mass: Mass, frame: FrozenSet[str]) -> Dict[str, object]:
+    """Serialize the belief frame itself, not a derived scalar.
+
+    The frame lists every hypothesis in the closed world; the mass
+    mapping carries the full credal state, one entry per focal element
+    (the whole frame renders as ``Omega``). Bel, Pl, and the pignistic
+    distribution are all derivable from this value, which is why
+    artifacts store it per turn instead of a single betting scalar:
+    each prompt/response turn adjusts exactly this assignment.
+    """
+    frame = frozenset(frame)
+    rendered: Dict[str, float] = {}
+    for focal, value in mass.items():
+        if not focal:
+            key = "empty"
+        elif focal == frame:
+            key = "Omega"
+        else:
+            key = ",".join(sorted(focal))
+        rendered[key] = rendered.get(key, 0.0) + float(value)
+    return {"frame": sorted(frame), "mass": rendered}

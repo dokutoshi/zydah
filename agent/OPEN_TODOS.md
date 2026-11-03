@@ -15,17 +15,19 @@ Sync contract (for the future script, not yet built):
 
 ## ZYDAH-002 — Wire Jira Cloud sync for todo files
 
-- Status: blocked (waiting on user env keys)
+- Status: in_progress (script built, dry-run + reads verified; live close-path proof pending)
 - Priority: high
 - Area: tooling
 - Source: user request
 - Jira: ZYDAH-1
-- Updated: 2026-11-02
+- Updated: 2026-11-03
 - Details: build the sync between `OPEN_TODOS.md` / `CLOSED_TODOS.md` and
   Jira Cloud once the user provides credentials. Expected shape: a small
   script reading config from env, creating/updating one issue per `##`
   section keyed by `ZYDAH-###`, and writing the key back to `Jira:`.
-  Blocked until keys/endpoint are supplied; do not invent a project key.
+  Credentials supplied (`src/.env`); `tools/jira_sync.py` built and
+  dry-run verified. Live proof of the close path (moved-to-closed items
+  transitioning to Done) still pending.
 - Acceptance: round-trip creates each open item once, updates edits, and
   closes issues moved to `CLOSED_TODOS.md`, without duplicating keys.
 
@@ -36,14 +38,16 @@ Sync contract (for the future script, not yet built):
 - Area: fusion / judges
 - Source: derivation doc §11 follow-up (deferred in plan)
 - Jira: ZYDAH-2
-- Updated: 2026-11-02
-- Details: `discount_mass` exists in `src/zydah/fusion.py` but nothing calls
-  it. The doc says a robust system does both (discount before, keep
-  conflict after), but where each judge's `alpha` comes from is a product
-  decision: fixed per-judge reliability, calibrated from data, or
-  judge-reported. Decide, then wire the chosen source.
-- Acceptance: documented alpha policy; discount applied at one clear call
-  site; tests cover the wiring.
+- Updated: 2026-11-03
+- Details: `discount_mass` exists in `src/zydah/fusion.py` and is now called
+  by `graph_resolver.condition` (resolver-side `conditioning_alpha` from
+  `conf/graph.yaml`). Still open is the per-judge question: the doc says
+  a robust system does both (discount before, keep conflict after), but
+  where each judge's `alpha` comes from is a product decision: fixed
+  per-judge reliability, calibrated from data, or judge-reported.
+  Decide, then wire the chosen source at the judge call site.
+- Acceptance: documented per-judge alpha policy; discount applied at the
+  judge call site; tests cover the wiring.
 
 ## ZYDAH-004 — Decide whether router consumes K / interval width directly
 
@@ -153,49 +157,6 @@ Sync contract (for the future script, not yet built):
   `verify_direct`; greeting/command fixtures pass with zero model mass
   calls; claim fixtures still intercept.
 
-## ZYDAH-112 — Probe GNN framework on this machine (PyTorch/MPS via uv)
-
-- Status: in_progress
-- Priority: high
-- Area: graph / tooling
-- Source: user direction (Apple Metal PyTorch page; install with uv)
-- Jira: ZYDAH-10
-- Updated: 2026-11-02
-- Details: project venv is Python 3.15.2 on arm64 macOS with no ML
-  framework installed. Probe in an isolated uv env first: install
-  `torch` (MPS backend per developer.apple.com/metal/pytorch), verify
-  `torch.backends.mps.is_available()` and a tensor op on `mps`, then
-  attempt `torch-geometric` (import `GATConv`, one forward pass). DGL is
-  the fallback if PyG wheels fail. Nothing enters `pyproject.toml` /
-  `uv.lock` until a winner is proven; the winner lands as an optional
-  `graph` dependency group so the core install stays numpy/polars.
-  Probe outcome (2026-11-02, uv isolated envs, installer: uv):
-  torch 2.15.0 installs on Python 3.15, but torch-geometric 2.8.1
-  crashes constructing `GATConv` on 3.15
-  (`TypeError: _eval_type() missing 1 required positional argument`),
-  so PyG is incompatible with the project interpreter today. On
-  Python 3.12 the same versions install and the `GATConv` forward
-  pass succeeds (output shape (3, 4), CPU). Chosen framework:
-  PyTorch Geometric on a pinned Python 3.12 graph environment
-  (uv-managed, project-local when built); DGL not needed.
-  `torch.backends.mps.is_available()` reported False in this
-  sandboxed session on both interpreters, so Metal acceleration is
-  unverified here; CPU execution is confirmed and sufficient for
-  these small graphs. MPS re-check on an unsandboxed run remains.
-  Device policy: this machine is Apple Neo; the Metal (MPS) backend
-  stays in as an optional plugin, not a requirement. Device selection
-  will be a `graph.yaml` setting (`auto` -> MPS when available, else
-  CPU) so the resolver runs everywhere and accelerates where Metal
-  is present, with no code change.
-  Installed (2026-11-02): `torch 2.15.0` + `torch-geometric 2.8.1`
-  added via `uv add --optional graph`; `GATConv` forward pass verified
-  in the project `.venv` (Python 3.12, CPU; MPS still unavailable in
-  this sandboxed session). `src/zydah/conf/graph.yaml` created with
-  device/model/training/calibration hyperparameters.
-- Acceptance: recorded probe outcome (versions, MPS availability,
-  forward-pass result) for torch and torch-geometric; chosen framework
-  named with the evidence; core `uv run pytest -q` unaffected.
-
 ## ZYDAH-116 — Synthetic training data for the GNN resolver
 
 - Status: open
@@ -217,13 +178,13 @@ Sync contract (for the future script, not yet built):
 
 ## ZYDAH-117 — Learned GNN scorer (PyG) with calibration gate
 
-- Status: in_progress (framework installed; blocked on ZYDAH-113/114/116)
+- Status: in_progress (framework installed; blocked on ZYDAH-116)
 - Priority: medium
 - Area: graph
 - Source: GNN resolver plan; depends on ZYDAH-112, ZYDAH-113,
   ZYDAH-116
 - Jira: ZYDAH-14
-- Updated: 2026-11-02
+- Updated: 2026-11-03
 - Details: heterogeneous graph attention model over the ZYDAH-113
   schema, trained on ZYDAH-116 data, implementing the same `Resolver`
   protocol as the ZYDAH-114 baseline. Runs in the pinned Python 3.12
