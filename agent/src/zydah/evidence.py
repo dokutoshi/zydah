@@ -21,6 +21,7 @@ from typing import List, Optional, Sequence
 
 ORIGINAL = "original"
 MODEL_FOLLOWUP = "model_followup"
+GRAPH_RESOLUTION = "graph_resolution"
 EXTERNAL = "external"
 
 PLAYGROUND_A = "A"  # generation, no Zydah judges

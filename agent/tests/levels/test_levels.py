@@ -15,9 +15,16 @@ import random
 import pytest
 
 from zydah.fusion import make_mass
+from zydah.graph import build_place_graph
+from zydah.graph_resolver import NumpyResolver
 from zydah.interface import capture_first_response, direct_verdict
 from zydah.transport import load_transport_config
-from zydah.verifier import ZydahVerifier, make_model_responder, serialize_followup
+from zydah.verifier import (
+    ZydahVerifier,
+    make_mass_elicitor,
+    make_model_responder,
+    serialize_followup,
+)
 
 FRAME = frozenset({"pass", "partial", "fail"})
 OMEGA = ("pass", "partial", "fail")
@@ -319,6 +326,185 @@ def test_simple_springfield_followup_live_model_answer(output_dir):
         out, question=question, response_text=response_text, cfg=cfg
     )
     (output_dir / "springfield_live.json").write_text(
+        json.dumps(record, indent=2) + "\n"
+    )
+
+
+@pytest.mark.skipif(
+    not _live_enabled(),
+    reason="live RLHF disabled: set ZYDAH_LIVE_TESTS=1 and MODEL_API_* env",
+)
+def test_live_human_choice_followup_to_model(output_dir):
+    # RLHF path, live after the pause: the pause itself is produced
+    # offline (unresolved Springfield graph), then the human choice
+    # B -> North is sent to the LIVE model as a HumanFollowup JSON,
+    # the model's revised response is appended, and re-elicitation is
+    # the LIVE default elicitor. The human keypress is the only
+    # programmatic input; everything downstream is a real model call.
+    sent = []
+    live_responder = make_model_responder()
+
+    def setup_responder(prompt, model_id):
+        return "No additional context is available."
+
+    verifier = ZydahVerifier(
+        FRAME,
+        responder=setup_responder,
+        mass_elicitor=SequenceElicitor([unsure_mass()]),
+        graph_resolver=NumpyResolver(),
+        graph_factory=lambda evidence: build_place_graph(),
+        session_id="s-b",
+    )
+    question = "What is the weather in Springfield today?"
+    response_text = "It is cloudy in Springfield today."
+    first = capture_first_response(
+        text=response_text, model_id="m-a", session_id="session-a", playground="A"
+    )
+    paused = verifier.verify_direct(
+        f"Claim to evaluate: {response_text}",
+        first_response=first,
+        assumptions=["Springfield has no state qualifier."],
+    )
+    assert paused["needs_human"] is True
+    assert {"key": "B", "value": "North"} in paused["choices"]
+
+    def recording_live_responder(prompt, model_id):
+        sent.append(prompt)
+        return live_responder(prompt, model_id)
+
+    verifier.responder = recording_live_responder
+    verifier.mass_elicitor = make_mass_elicitor(
+        str(verifier.cfg.direct_mass_prompt_template)
+    )
+    resumed = verifier.resume_direct(paused, "B")
+
+    # The transmitted follow-up is the human-choice JSON + graph context.
+    assert sent, "live responder was never called"
+    sent_payload = json.loads(sent[0])
+    assert sent_payload["human_choice"] == {"key": "B", "value": "North"}
+    assert sent_payload["context"]["partition"] == "North"
+    assert sent_payload["context"]["candidates"] == [
+        "Springfield, IL",
+        "Springfield, MA",
+        "Springfield, OH",
+        "Springfield, OR",
+    ]
+    assert "Springfield" in sent_payload["context"]["question"]
+    assert resumed["human_followup"] == sent_payload
+    assert resumed["history"][0]["human_feedback"] == resumed["human_followup"]
+    model_response = resumed["history"][0].get("response")
+    assert model_response and str(model_response).strip()
+    model_answers = [
+        chunk.text
+        for chunk in resumed["ledger"].chunks
+        if chunk.kind == "model_followup"
+    ]
+    if resumed.get("needs_human"):
+        # Faithful alternative: the model used the North context and
+        # asked the next narrowing question instead of answering.
+        assert "Springfield" in str(model_response)
+    else:
+        assert model_answers and all(str(t).strip() for t in model_answers)
+        assert resumed["followups"] >= 1
+    assert resumed["followups"] <= int(verifier.cfg.max_iterations)
+    if resumed["verdict"] == "good":
+        assert resumed["history"][-1]["zydah"]["width"] <= float(
+            verifier.cfg.width_threshold
+        )
+    record = {
+        "question": question,
+        "response": response_text,
+        "choices": paused["choices"],
+        "human_followup_sent": sent[0],
+        "model_response": model_response,
+        "model_answers": model_answers,
+        "human_feedback": resumed["human_followup"],
+        "verdict": resumed["verdict"],
+        "needs_human": resumed.get("needs_human", False),
+        "followups": resumed["followups"],
+        "independence": resumed.get("independence", {}).get("mode"),
+        "turns": live_cycle_record(
+            resumed, question=question, response_text=response_text, cfg=verifier.cfg
+        )["turns"],
+    }
+    (output_dir / "springfield_rlhf.json").write_text(
+        json.dumps(record, indent=2) + "\n"
+    )
+
+
+@pytest.mark.skipif(
+    not _live_enabled(),
+    reason="live clue test disabled: set ZYDAH_LIVE_TESTS=1 and MODEL_API_* env",
+)
+def test_live_other_clue_through_zydah(output_dir):
+    # The Celtics clue, live: pause is produced offline, then the
+    # free-text Other answer goes through the LIVE model (anchored by
+    # the directional frame) and re-elicitation is the LIVE elicitor.
+    # See docs/Panel Log - Why Zydah vs MC Graph.md (2026-11-02).
+    sent = []
+    live_responder = make_model_responder()
+
+    def setup_responder(prompt, model_id):
+        return "No additional context is available."
+
+    verifier = ZydahVerifier(
+        FRAME,
+        responder=setup_responder,
+        mass_elicitor=SequenceElicitor([unsure_mass()]),
+        graph_resolver=NumpyResolver(),
+        graph_factory=lambda evidence: build_place_graph(),
+        session_id="s-b",
+    )
+    question = "What is the weather in Springfield today?"
+    response_text = "It is cloudy in Springfield today."
+    first = capture_first_response(
+        text=response_text, model_id="m-a", session_id="session-a", playground="A"
+    )
+    paused = verifier.verify_direct(
+        f"Claim to evaluate: {response_text}",
+        first_response=first,
+        assumptions=["Springfield has no state qualifier."],
+    )
+    assert paused["needs_human"] is True
+
+    def recording_live_responder(prompt, model_id):
+        sent.append(prompt)
+        return live_responder(prompt, model_id)
+
+    verifier.responder = recording_live_responder
+    verifier.mass_elicitor = make_mass_elicitor(
+        str(verifier.cfg.direct_mass_prompt_template)
+    )
+    resumed = verifier.resume_direct(
+        paused, "E", other_text="the celtics are a good team"
+    )
+    assert sent, "live responder was never called"
+    payload = json.loads(sent[0])
+    assert payload["human_choice"] == {
+        "key": "E",
+        "value": "the celtics are a good team",
+    }
+    assert payload["context"]["offered_choices"][:4] == [
+        "East", "North", "South", "West",
+    ]
+    model_response = resumed["history"][0].get("response")
+    assert model_response and str(model_response).strip()
+    record = {
+        "question": question,
+        "response": response_text,
+        "free_text": "the celtics are a good team",
+        "human_followup_sent": payload,
+        "model_response": model_response,
+        "graph_conditioning": resumed.get("graph_conditioning"),
+        "verdict": resumed["verdict"],
+        "needs_human": resumed.get("needs_human", False),
+        "followups": resumed["followups"],
+        "independence": resumed.get("independence", {}).get("mode"),
+        "turns": live_cycle_record(
+            resumed, question=question, response_text=response_text, cfg=verifier.cfg
+        )["turns"],
+    }
+    (output_dir / "celtics_clue.json").write_text(
         json.dumps(record, indent=2) + "\n"
     )
 

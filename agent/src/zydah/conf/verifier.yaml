@@ -12,6 +12,13 @@ good_verdict: good
 question: "Need more info, what question reduces uncertainty?"
 followup_summary: "Clarify the blocking assumption before relying on this response."
 additional_info_prefix: "\n\nAdditional information:\n"
+# A responder answer containing "?" plus any marker is a question for
+# the human, not evidence: the loop pauses as needs_human instead.
+human_question_markers: ["which", "could you", "can you", "please specify", "please clarify", "do you mean"]
+human_question_template: "Which of these applies?\n{options}"
+relationship_question_template: "How does '{clue}' relate to {candidate}? Identify any city, state, or regional relationship, or say there is none."
+relationship_negative_markers: ["unrelated", "no relation", "no relationship", "no direct relationship", "no city, state, or regional relationship", "no city/state/regional relationship", "none.", "has no", "not related", "does not help", "doesn't help", "no connection"]
+relationship_affirmative_markers: ["yes", "direct state", "same state", "shares a state", "share a state", "plays in", "play in", "located in", "based in", "home to"]
 
 direct_mass_prompt_template: |
   You are an expert evaluator. Assess the evidence below against the
