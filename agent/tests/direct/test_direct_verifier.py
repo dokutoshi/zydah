@@ -558,6 +558,39 @@ def test_enumeration_of_candidates_is_not_relationship_support():
     assert resumed["needs_human"] is True
 
 
+def test_question_answer_with_unresolved_graph_offers_choices():
+    # A question-shaped model answer must face the graph first: the
+    # unresolved graph generates the [human] MC question (with
+    # choices), and the pause is resumable via resume_direct.
+    def responder(prompt, model_id):
+        if '"human_choice"' in prompt:
+            return "Springfield, Illinois: it is cloudy today."
+        return "Which Springfield did you mean?"
+
+    verifier = ZydahVerifier(
+        FRAME,
+        responder=responder,
+        mass_elicitor=SequenceElicitor([wide_mass(), narrow_mass()]),
+        graph_resolver=NumpyResolver(),
+        graph_factory=lambda evidence: build_place_graph(),
+        session_id="s-b",
+    )
+    first = capture_first_response(
+        text="It is cloudy in Springfield today.",
+        model_id="m-a",
+        session_id="session-a",
+        playground="A",
+    )
+    out = verifier.verify_direct("claim", first_response=first)
+    assert out["needs_human"] is True
+    assert out["history"][0]["route"] == "agent_unresolved"
+    assert [c["value"] for c in out["choices"]] == [
+        "East", "North", "South", "West", "Other",
+    ]
+    resumed = verifier.resume_direct(out, "B")
+    assert resumed["verdict"] == "good"
+
+
 def test_balanced_markers_affirmative_counterparts_condition():
     # New affirmative family: existence/connection phrasing, not just
     # the location verbs the original list had.

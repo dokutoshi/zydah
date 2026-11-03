@@ -78,6 +78,22 @@ class SequenceElicitor:
         return self._masses[idx]
 
 
+def _evaluation_with_belief_frame(entry):
+    """Artifact evaluation: belief frame, not a pignistic scalar."""
+    frame_value = belief_frame(entry["mass"], FRAME)
+    direct = direct_verdict([entry["mass"]], FRAME)
+    direct.pop("pignistic", None)
+    direct["belief_frame"] = frame_value
+    zydah = dict(entry["zydah"])
+    zydah.pop("pignistic", None)
+    zydah["belief_frame"] = frame_value
+    return frame_value, {
+        "direct": direct,
+        "zydah": zydah,
+        "validator": entry["validation"].get("verdict"),
+    }
+
+
 def cycle_record(out, *, question, response_text):
     """Artifact schema: identify the exchange, not just the judgment.
 
@@ -98,17 +114,13 @@ def cycle_record(out, *, question, response_text):
         prev = history[idx - 2] if idx > 1 else None
         prev_validation = prev.get("validation", {}) if prev else {}
         validation = entry["validation"]
-        zydah = entry["zydah"]
+        frame_value, evaluation = _evaluation_with_belief_frame(entry)
         turn = {
             "turn": idx,
             "question": question if idx == 1 else prev_validation.get("question"),
             "response": response_text if idx == 1 else (prev.get("response") if prev else None),
-            "belief_frame": belief_frame(entry["mass"], FRAME),
-            "evaluation": {
-                "direct": direct_verdict([entry["mass"]], FRAME),
-                "zydah": zydah,
-                "validator": validation.get("verdict"),
-            },
+            "belief_frame": frame_value,
+            "evaluation": evaluation,
         }
         if entry.get("followup"):
             turn["followup"] = {
@@ -236,17 +248,13 @@ def live_cycle_record(out, *, question, response_text, cfg):
     history = out["history"]
     for idx, entry in enumerate(history, start=1):
         prev = history[idx - 2] if idx > 1 else None
-        validation = entry["validation"]
         zydah = entry["zydah"]
+        frame_value, evaluation = _evaluation_with_belief_frame(entry)
         turn = {
             "turn": idx,
-            "belief_frame": belief_frame(entry["mass"], FRAME),
+            "belief_frame": frame_value,
             "width": zydah.get("width"),
-            "evaluation": {
-                "direct": direct_verdict([entry["mass"]], FRAME),
-                "zydah": zydah,
-                "validator": validation.get("verdict"),
-            },
+            "evaluation": evaluation,
         }
         if idx == 1:
             turn["question"] = question
@@ -309,15 +317,22 @@ def test_simple_springfield_followup_live_model_answer(output_dir):
         for entry in out["history"]
         if entry.get("followup") and entry.get("response")
     ]
-    assert len(sent) == out["followups"] <= int(cfg.max_iterations)
-    assert len(sent) == len(answered)
+    assert len(sent) == len(answered) <= int(cfg.max_iterations) + 1
     for entry, prompt in zip(answered, sent):
         assert json.loads(prompt) == entry["followup"]
         assert prompt == serialize_followup(entry["followup"])
-    # Termination consistency with the Hydra-defined values.
+    # Termination consistency with the Hydra-defined values: the loop
+    # closes good, exhausts the budget, or pauses for a human with
+    # graph multiple-choice choices (model asked its own question).
     widths = [entry["zydah"]["width"] for entry in out["history"]]
     if out["verdict"] == "good":
         assert widths[-1] <= float(cfg.width_threshold)
+        assert len(sent) == out["followups"]
+    elif out.get("needs_human"):
+        # Plain question pause (no graph wired here); graph-wired
+        # pauses carry structured choices, covered in tests/direct.
+        assert out.get("human_question")
+        assert widths[-1] > float(cfg.width_threshold)
     else:
         assert out["verdict"] is False
         assert out["followups"] == int(cfg.max_iterations)

@@ -389,20 +389,7 @@ class ZydahVerifier:
                     "model_id": self.model_id,
                 }
             history[-1]["response"] = answer
-            if self._is_human_question(answer):
-                history[-1]["route"] = "human"
-                return {
-                    "verdict": False,
-                    "needs_human": True,
-                    "human_question": str(answer),
-                    "question": validation["question"],
-                    "followup": followup,
-                    "prompt": prompt,
-                    "result": result,
-                    "history": history,
-                    "followups": followups,
-                    "model_id": self.model_id,
-                }
+            # Deduction before routing, as in verify_direct.
             resolution, graph = self._resolve_with_graph(current_evidence)
             if resolution is not None and resolution.status == "unresolved":
                 history[-1]["route"] = "agent_unresolved"
@@ -413,6 +400,20 @@ class ZydahVerifier:
                     "choices": [c.model_dump(mode="json") for c in self._partition_choices(graph)],
                     "evidence": current_evidence,
                     "original_question": current_evidence,
+                    "question": validation["question"],
+                    "followup": followup,
+                    "prompt": prompt,
+                    "result": result,
+                    "history": history,
+                    "followups": followups,
+                    "model_id": self.model_id,
+                }
+            if self._is_human_question(answer):
+                history[-1]["route"] = "human"
+                return {
+                    "verdict": False,
+                    "needs_human": True,
+                    "human_question": str(answer),
                     "question": validation["question"],
                     "followup": followup,
                     "prompt": prompt,
@@ -1127,25 +1128,10 @@ class ZydahVerifier:
                     "ledger": ledger,
                 }
             history[-1]["response"] = answer
-            if self._is_human_question(answer):
-                history[-1]["route"] = "human"
-                independence = self._independence(first_session, followups)
-                self._log({"event": "verify_direct", "verdict": False, "needs_human": True, "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict")})
-                return {
-                    "verdict": False,
-                    "needs_human": True,
-                    "human_question": str(answer),
-                    "question": validation["question"],
-                    "followup": followup,
-                    "prompt": prompt,
-                    "result": result,
-                    "history": history,
-                    "followups": followups,
-                    "model_id": self.model_id,
-                    "mode": "direct",
-                    "independence": independence,
-                    "ledger": ledger,
-                }
+            # Deduction before routing: even a question-shaped answer
+            # first faces the graph. An unresolved graph generates the
+            # [human] multiple-choice question itself (resumable); a
+            # resolved one lets the agent continue without the human.
             resolution, graph = self._resolve_with_graph(view_text)
             if resolution is not None and resolution.status == "unresolved":
                 history[-1]["route"] = "agent_unresolved"
@@ -1158,6 +1144,25 @@ class ZydahVerifier:
                     "choices": [c.model_dump(mode="json") for c in self._partition_choices(graph)],
                     "question": validation["question"],
                     "original_question": evidence,
+                    "followup": followup,
+                    "prompt": prompt,
+                    "result": result,
+                    "history": history,
+                    "followups": followups,
+                    "model_id": self.model_id,
+                    "mode": "direct",
+                    "independence": independence,
+                    "ledger": ledger,
+                }
+            if self._is_human_question(answer):
+                history[-1]["route"] = "human"
+                independence = self._independence(first_session, followups)
+                self._log({"event": "verify_direct", "verdict": False, "needs_human": True, "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict")})
+                return {
+                    "verdict": False,
+                    "needs_human": True,
+                    "human_question": str(answer),
+                    "question": validation["question"],
                     "followup": followup,
                     "prompt": prompt,
                     "result": result,
