@@ -625,14 +625,17 @@ def _panel_json_record(entry: Mapping[str, object]) -> Dict:
     """Compact per-judge record for one panel cycle (Streamlit-ready).
 
     Each judge: ZJ tag, seat (the model in that seat), config name,
-    model, session id, its own mass (feedback), and pignistic
-    (individual scoring); plus the fused interval summary.
+    model, session id, Shafer alpha, discounted mass (the fusion input),
+    its pignistic (individual scoring), and raw mass when retained;
+    plus the fused interval summary.
     """
     judges = []
     masses = entry.get("judge_masses") or []
+    raw_masses = entry.get("judge_raw_masses") or []
     metas = entry.get("judges") or []
     for idx, mass in enumerate(masses):  # type: ignore[union-attr]
         meta = metas[idx] if idx < len(metas) else {}  # type: ignore[union-attr]
+        raw_mass = raw_masses[idx] if idx < len(raw_masses) else None
         judges.append(
             {
                 "tag": _judge_tag(idx),
@@ -640,8 +643,14 @@ def _panel_json_record(entry: Mapping[str, object]) -> Dict:
                 "name": meta.get("name") or f"judge-{idx + 1}",
                 "model": meta.get("model"),
                 "session_id": meta.get("session_id"),
+                "alpha": meta.get("alpha"),
                 "mass": belief_frame(mass, FRAME)["mass"],  # type: ignore[arg-type]
                 "pignistic": pignistic(mass, FRAME),  # type: ignore[arg-type]
+                "raw_mass": (
+                    belief_frame(raw_mass, FRAME)["mass"]  # type: ignore[arg-type]
+                    if raw_mass is not None
+                    else None
+                ),
             }
         )
     zydah_entry = entry.get("zydah") or {}

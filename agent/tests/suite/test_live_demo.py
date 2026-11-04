@@ -1780,9 +1780,23 @@ def test_panel_json_record_pairs_each_judge_with_session_and_score():
             make_mass(frame, {"pass": 0.8, frame: 0.2}),
             make_mass(frame, {"fail": 0.7, frame: 0.3}),
         ],
+        "judge_raw_masses": [
+            make_mass(frame, {"pass": 0.9, frame: 0.1}),
+            make_mass(frame, {"fail": 0.8, frame: 0.2}),
+        ],
         "judges": [
-            {"name": "wonder", "model": "muse-wonder", "session_id": "sess-1"},
-            {"name": "spark", "model": "muse-spark", "session_id": "sess-2"},
+            {
+                "name": "wonder",
+                "model": "muse-wonder",
+                "session_id": "sess-1",
+                "alpha": 0.5,
+            },
+            {
+                "name": "spark",
+                "model": "muse-spark",
+                "session_id": "sess-2",
+                "alpha": 1.0,
+            },
         ],
         "zydah": {
             "bel": 0.5,
@@ -1802,7 +1816,9 @@ def test_panel_json_record_pairs_each_judge_with_session_and_score():
     assert record["judges"][0]["model"] == "muse-wonder"
     assert record["judges"][1]["tag"] == "ZJ-02"
     assert record["judges"][0]["session_id"] == "sess-1"
+    assert record["judges"][0]["alpha"] == 0.5
     assert record["judges"][0]["mass"]["pass"] == 0.8
+    assert record["judges"][0]["raw_mass"]["pass"] == 0.9
     assert record["judges"][1]["pignistic"]["fail"] > 0.5
 
 
