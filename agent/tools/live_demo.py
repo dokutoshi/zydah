@@ -11,6 +11,7 @@ Usage:
     uv run python tools/live_demo.py --save outputs/live_demo/latest.json
     uv run python tools/live_demo.py --verbose   # INFO logs to stderr
     uv run python tools/live_demo.py --log-file trace.log
+    uv run python tools/live_demo.py --score-mode substantive
 
 Environment values are read from the repository-root ``.env`` by
 default. No secret values are printed.
@@ -294,6 +295,47 @@ def _ends_with_question(text: str) -> bool:
     return tail.endswith("?")
 
 
+SCORE_MODE_EVERY = "every"
+SCORE_MODE_SUBSTANTIVE = "substantive"
+SCORE_MODES = (SCORE_MODE_EVERY, SCORE_MODE_SUBSTANTIVE)
+
+
+def _is_substantive_response(text: str) -> bool:
+    """True when a response contains claim-bearing, non-question text.
+
+    Structural and conservative: a substantive answer that ends
+    with a question is identified by a period-terminated declarative
+    segment before that question. When the response does not end in
+    a question, any meaningful text is enough. A greeting followed
+    only by a question therefore stays unscored in substantive mode.
+    """
+    segments = re.split(r"(?<=[.!?])\s+", str(text).strip())
+    meaningful_segments = []
+    for segment in segments:
+        meaningful = segment.strip().strip("*_`#> ")
+        if any(char.isalnum() for char in meaningful):
+            meaningful_segments.append(meaningful)
+    if any(segment.rstrip("\"'`)").endswith(".") for segment in meaningful_segments):
+        return True
+    lines = [
+        line.strip().strip("*_`#> ")
+        for line in str(text).splitlines()
+        if any(char.isalnum() for char in line)
+    ]
+    if any(
+        re.match(r"^(?:[-*•]|\d+[.)])\s+\S", line.strip())
+        and not _ends_with_question(line)
+        for line in str(text).splitlines()
+    ):
+        return True
+    if not _ends_with_question(text):
+        return bool(meaningful_segments)
+    non_question_lines = [
+        line for line in lines if not _ends_with_question(line)
+    ]
+    return len(non_question_lines) > 1
+
+
 def _asks_human(text: str, cfg) -> bool:
     """True when a model response is itself a question for the human.
 
@@ -347,10 +389,14 @@ def _streaming_responder(emit: Emit):
     return responder
 
 
-def _thinking_elicitor(base_elicitor, emit: Emit):
+def _thinking_elicitor(
+    base_elicitor, emit: Emit, capture_zydah_view: bool = False
+):
     """Wrap a mass elicitor with Zydah's own thinking semaphore."""
 
     def elicitor(evidence, frame, model_id):
+        if capture_zydah_view:
+            logger.info("[zydah] ...Thinking")
         emit("[zydah] ...Thinking")
         return base_elicitor(evidence, frame, model_id)
 
@@ -363,6 +409,7 @@ def build_verifier(
     model_id: str,
     emit: Emit = print,
     show_zydah: bool = False,
+    capture_zydah_view: bool = False,
 ):
     """Build the live verifier, adding the Springfield graph when relevant."""
     cfg = load_verifier_config()
@@ -384,7 +431,9 @@ def build_verifier(
         FRAME,
         responder=_streaming_responder(emit),
         mass_elicitor=_thinking_elicitor(
-            base_elicitor, emit if show_zydah else (lambda line: None)
+            base_elicitor,
+            emit if show_zydah else (lambda line: None),
+            capture_zydah_view=capture_zydah_view,
         ),
         config=cfg,
         model_id=model_id,
@@ -434,15 +483,49 @@ def _final_response_line(result: Mapping[str, object]) -> str:
     return "the response is still not dependable."
 
 
+def _internal_view_lines(result: Mapping[str, object]) -> List[str]:
+    """Zydah's internal view: transcript, per-turn frames, conditioning."""
+    lines: List[str] = []
+    history = result.get("history") or []
+    transcript = format_transcript(history)  # type: ignore[arg-type]
+    if transcript:
+        lines.append(transcript)
+    for idx, entry in enumerate(history, start=1):  # type: ignore[union-attr]
+        if isinstance(entry, Mapping) and "mass" in entry:
+            lines.append(f"turn {idx} belief_frame:")
+            lines.append(
+                json.dumps(
+                    belief_frame(entry["mass"], FRAME), indent=2  # type: ignore[arg-type]
+                )
+            )
+    conditioning = result.get("graph_conditioning")
+    if conditioning:
+        lines.append("graph_conditioning:")
+        lines.append(json.dumps(conditioning, indent=2))
+    return lines
+
+
+def _log_internal_view(result: Mapping[str, object]) -> None:
+    """Capture Zydah's internal view in the INFO log."""
+    for line in _internal_view_lines(result):
+        logger.info("%s", line)
+
+
 def render_result(
-    result: Mapping[str, object], emit: Emit, show_zydah: bool = False
+    result: Mapping[str, object],
+    emit: Emit,
+    show_zydah: bool = False,
+    capture_zydah_view: bool = False,
 ) -> None:
     """Render the verifier's current state.
 
     Default view is the concluded [zydah] sentence plus the verdict
     line. With ``show_zydah`` (--zydah), also show the internal view:
     the follow-up transcript and the belief frame as it adjusted on
-    every turn, plus any graph conditioning.
+    every turn, plus any graph conditioning. With
+    ``capture_zydah_view`` (--verbose), that same internal view is
+    captured through ``logger.info`` without being shown on the
+    terminal unless ``show_zydah`` is also enabled.
     """
     emit(f"[zydah] {_final_response_line(result)}")
     emit(
@@ -452,24 +535,13 @@ def render_result(
             followups=result.get("followups", 0),
         )
     )
-    if not show_zydah:
+    if not show_zydah and not capture_zydah_view:
         return
-    history = result.get("history") or []
-    transcript = format_transcript(history)  # type: ignore[arg-type]
-    if transcript:
-        emit(transcript)
-    for idx, entry in enumerate(history, start=1):  # type: ignore[union-attr]
-        if isinstance(entry, Mapping) and "mass" in entry:
-            emit(f"turn {idx} belief_frame:")
-            emit(
-                json.dumps(
-                    belief_frame(entry["mass"], FRAME), indent=2  # type: ignore[arg-type]
-                )
-            )
-    conditioning = result.get("graph_conditioning")
-    if conditioning:
-        emit("graph_conditioning:")
-        emit(json.dumps(conditioning, indent=2))
+    for line in _internal_view_lines(result):
+        if show_zydah:
+            emit(line)
+        if capture_zydah_view:
+            logger.info("%s", line)
 
 
 def _choice_for_key(result: Mapping[str, object], key: str):
@@ -486,6 +558,7 @@ def interact(
     ask: Ask = terminal_input,
     emit: Emit = print,
     show_zydah: bool = False,
+    capture_zydah_view: bool = False,
 ):
     """Pause for terminal choices and resume the direct loop."""
     current = result
@@ -527,7 +600,12 @@ def interact(
             _log_error("resume_direct", exc)
             emit(f"[zydah] resume failed: {exc} (logged to errors.log)")
             return current
-        render_result(current, emit, show_zydah=show_zydah)
+        render_result(
+            current,
+            emit,
+            show_zydah=show_zydah,
+            capture_zydah_view=capture_zydah_view,
+        )
         _log_zydah_json("", "", current)
     return current
 
@@ -554,6 +632,10 @@ def artifact_for(question: str, response: str, result: Mapping[str, object]) -> 
         "followups": result.get("followups", 0),
         "turns": turns,
     }
+    if result.get("score_mode"):
+        artifact["score_mode"] = result.get("score_mode")
+    if result.get("unscored_reason"):
+        artifact["unscored_reason"] = result.get("unscored_reason")
     if result.get("graph_conditioning"):
         artifact["graph_conditioning"] = result["graph_conditioning"]
     return artifact
@@ -742,10 +824,17 @@ def run_question(
     ask: Ask = terminal_input,
     emit: Emit = print,
     show_zydah: bool = False,
+    score_mode: str = SCORE_MODE_EVERY,
+    capture_zydah_view: bool = False,
 ):
-    """Ask the live model once, verify its answer, and pause for input."""
+    """Ask the live model, score responses as they land, and pause for input."""
+    if score_mode not in SCORE_MODES:
+        raise ValueError(
+            f"score_mode must be one of {SCORE_MODES}, got {score_mode!r}"
+        )
     cfg = cfg or load_verifier_config()
     model_id = _model_id(cfg)
+    logger.info("score_mode=%s", score_mode)
     logger.info("question: %r", question)
     response, pending_direction = _stream_model_text(question, model_id, emit)
     logger.info("model response:\n%s", response)
@@ -755,7 +844,12 @@ def run_question(
         pending_direction,
     )
     verifier = build_verifier(
-        question, response, model_id, emit=emit, show_zydah=show_zydah
+        question,
+        response,
+        model_id,
+        emit=emit,
+        show_zydah=show_zydah,
+        capture_zydah_view=capture_zydah_view,
     )
     context_lines = [f"Question: {question}", f"Response: {response}"]
     try:
@@ -763,6 +857,114 @@ def run_question(
     except Exception:
         clarification_limit = 5  # config always defines this; test cfg may not
     clarifications = 0
+    human_conditioning = None
+
+    def _condition_on_text(text: str):
+        """Run the relationship resolver on a human's free text.
+
+        Human free text enters the same HumanFollowup JSON ->
+        polarity gate (System 1 markers veto before MiniLM scores)
+        -> candidate beliefs machinery as a structured Other
+        choice. Returns the conditioning summary text, or None when
+        nothing could be conditioned (no graph, no support).
+        """
+        nonlocal human_conditioning
+        condition = getattr(verifier, "condition_on_human_text", None)
+        if not callable(condition):
+            return None
+        try:
+            found = condition(text, question=question)
+        except Exception as exc:  # keep the demo terminal usable
+            _log_error("human_conditioning", exc)
+            return None
+        if found is None:
+            return None
+        human_conditioning = found
+        logger.info("human conditioning: %s", found.get("text"))
+        context_lines.append(
+            f"Human clue conditioning: {found.get('text')}"
+        )
+        return str(found.get("text") or "") or None
+
+    checkpoint_history: List[object] = []
+    checkpoint_followups = 0
+    latest_result = None
+    paused_result = None
+    last_scored_signature = None
+    last_scored_response = None
+    rendered_result_id = None
+    captured_result_id = None
+
+    def _score_response(current_response: str):
+        """Score one landed model response and log its belief frame."""
+        nonlocal checkpoint_followups, latest_result, paused_result
+        nonlocal last_scored_signature, last_scored_response, rendered_result_id
+        nonlocal captured_result_id
+        if (
+            score_mode == SCORE_MODE_SUBSTANTIVE
+            and not _is_substantive_response(current_response)
+        ):
+            logger.info(
+                "zydah_unscored reason=pure_question mode=substantive"
+            )
+            return latest_result
+        evidence = "\n".join(
+            [*context_lines, f"Claim to evaluate: {current_response}"]
+        )
+        signature = (current_response, evidence)
+        if signature == last_scored_signature:
+            return latest_result
+        logger.info("evidence scored:\n%s", evidence)
+        first = capture_first_response(
+            text=current_response,
+            model_id=model_id,
+            session_id=f"demo-model-{uuid.uuid4().hex[:8]}",
+            playground="A",
+        )
+        scored = verifier.verify_direct(
+            evidence,
+            first_response=first,
+            assumptions=_assumptions_for(question, current_response),
+        )
+        result = dict(scored)
+        if human_conditioning is not None:
+            result["graph_conditioning"] = human_conditioning
+        checkpoint_history.extend(result.get("history") or [])
+        checkpoint_followups += int(result.get("followups", 0) or 0)
+        result["history"] = list(checkpoint_history)
+        result["followups"] = checkpoint_followups
+        result["score_mode"] = score_mode
+        latest_result = result
+        last_scored_signature = signature
+        last_scored_response = current_response
+        _log_zydah_json(question, current_response, latest_result)
+        if show_zydah:
+            render_result(
+                latest_result,
+                emit,
+                show_zydah=True,
+                capture_zydah_view=capture_zydah_view,
+            )
+            rendered_result_id = id(latest_result)
+            if capture_zydah_view:
+                captured_result_id = id(latest_result)
+        elif capture_zydah_view:
+            _log_internal_view(latest_result)
+            captured_result_id = id(latest_result)
+        if latest_result.get("needs_human") and latest_result.get("choices"):
+            paused_result = latest_result
+        return latest_result
+
+    def _quit_result(paused):
+        """Keep an existing checkpoint when the human quits mid-question."""
+        if latest_result is not None:
+            quit_result = dict(latest_result)
+            quit_result["quit"] = True
+            return quit_result
+        logger.info(
+            "zydah_unscored reason=no_checkpoint mode=%s", score_mode
+        )
+        return paused
 
     def _clarify(current_response: str):
         """Clarification rounds for a question-ending model response.
@@ -775,7 +977,8 @@ def run_question(
         """
         nonlocal clarifications, pending_direction
         while (
-            _asks_human(current_response, cfg)
+            paused_result is None
+            and _asks_human(current_response, cfg)
             and clarifications < clarification_limit
         ):
             clarifications += 1
@@ -800,12 +1003,18 @@ def run_question(
             if not human_answer.strip():
                 break
             context_lines.append(f"Human answer: {human_answer}")
+            conditioning_text = _condition_on_text(human_answer)
             followup_prompt = (
                 f"Original question: {question}\n"
                 f"You asked for clarification: {current_response}\n"
                 f"Human answer: {human_answer}\n"
                 "Please now answer the original question using that answer."
             )
+            if conditioning_text:
+                followup_prompt += (
+                    "\nGraph conditioning from the human's clue: "
+                    f"{conditioning_text}"
+                )
             current_response, pending_next = _stream_model_text(
                 followup_prompt, model_id, emit
             )
@@ -814,19 +1023,23 @@ def run_question(
             if pending_next is not None:
                 pending_direction = pending_next
             context_lines.append(f"Response: {current_response}")
+            _score_response(current_response)
         return current_response, None
 
-    response, paused = _clarify(response)
-    if paused is not None:
-        return paused, verifier, response
+    _score_response(response)
+    paused = None
+    if paused_result is None:
+        response, paused = _clarify(response)
+        if paused is not None:
+            return _quit_result(paused), verifier, response
     # The human directs from the input buffer: typed text is sent as
-    # a direction on Enter; an empty buffer simply releases Zydah to
-    # evaluate the response as-is. Nothing is scored before this.
+    # a direction on Enter; an empty buffer releases Zydah to finish
+    # evaluating the current response in its accumulated context.
     # Buffered text ending in '?' is not a direction, though: it is
     # a new question for the model. Route it (recorded as a Human
     # question), score its answer, and gate again on that answer.
     question_rounds = 0
-    while True:
+    while paused_result is None:
         try:
             direction = (
                 pending_direction
@@ -846,11 +1059,12 @@ def run_question(
                 "followups": 0,
                 "history": [],
             }
-            return paused, verifier, response
+            return _quit_result(paused), verifier, response
         if not direction.strip():
             break
         if not _ends_with_question(direction.strip()):
             context_lines.append(f"Human direction: {direction.strip()}")
+            _condition_on_text(direction.strip())
             break
         question_rounds += 1
         if question_rounds > clarification_limit:
@@ -871,29 +1085,45 @@ def run_question(
         if pending_next is not None:
             pending_direction = pending_next
         context_lines.append(f"Response: {response}")
-        response, paused = _clarify(response)
-        if paused is not None:
-            return paused, verifier, response
-    first = capture_first_response(
-        text=response,
-        model_id=model_id,
-        session_id=f"demo-model-{uuid.uuid4().hex[:8]}",
-        playground="A",
-    )
-    evidence = "\n".join(
-        [*context_lines, f"Claim to evaluate: {response}"]
-    )
-    logger.info("evidence scored:\n%s", evidence)
-    # No extra Thinking here: the elicitor emits one per scoring call.
-    result = verifier.verify_direct(
-        evidence,
-        first_response=first,
-        assumptions=_assumptions_for(question, response),
-    )
-    _log_zydah_json(question, response, result)
-    render_result(result, emit, show_zydah=show_zydah)
+        _score_response(response)
+        if paused_result is None:
+            response, paused = _clarify(response)
+            if paused is not None:
+                return _quit_result(paused), verifier, response
+    result = paused_result or _score_response(response)
+    if result is None or last_scored_response != response:
+        logger.info(
+            "zydah_unscored reason=no_substantive_response mode=%s",
+            score_mode,
+        )
+        result = {
+            "verdict": False,
+            "needs_human": _asks_human(response, cfg),
+            "followups": checkpoint_followups,
+            "history": list(checkpoint_history),
+            "score_mode": score_mode,
+            "unscored_reason": "pure_question",
+        }
+        if human_conditioning is not None:
+            result["graph_conditioning"] = human_conditioning
+    if id(result) != rendered_result_id:
+        render_result(
+            result,
+            emit,
+            show_zydah=show_zydah,
+            capture_zydah_view=(
+                capture_zydah_view and id(result) != captured_result_id
+            ),
+        )
+        if capture_zydah_view:
+            captured_result_id = id(result)
     final = interact(
-        result, verifier, ask=ask, emit=emit, show_zydah=show_zydah
+        result,
+        verifier,
+        ask=ask,
+        emit=emit,
+        show_zydah=show_zydah,
+        capture_zydah_view=capture_zydah_view,
     )
     return final, verifier, response
 
@@ -932,8 +1162,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--env", default=str(REPO_ROOT / ".env"), help="env file to load")
     parser.add_argument("--save", type=Path, help="write the latest run artifact JSON here")
     parser.add_argument("--zydah", action="store_true", help="show Zydah's internal view: thinking semaphores, follow-up transcript, per-turn belief frames")
-    parser.add_argument("--verbose", action="store_true", help="log input, model text, routing decisions, and scored evidence to stderr (logging INFO)")
+    parser.add_argument("--verbose", action="store_true", help="log input, model text, routing decisions, scored evidence, and Zydah's internal view to stderr (logging INFO)")
     parser.add_argument("--log-file", type=Path, help="write INFO logs to this file via a FileHandler (no stderr redirect needed)")
+    parser.add_argument("--score-mode", choices=SCORE_MODES, default=SCORE_MODE_EVERY, help="score every model response (default) or only substantive responses")
     args = parser.parse_args(argv)
 
     sys.excepthook = _excepthook
@@ -951,6 +1182,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             force=True,
         )
         logger.info("verbose logging enabled")
+    logger.info("score_mode=%s", args.score_mode)
 
     env_path = Path(args.env)
     if env_path.exists():
@@ -979,7 +1211,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 tee.begin(question)
             try:
                 result, _verifier, response = run_question(
-                    question, cfg=cfg, emit=emit, show_zydah=args.zydah
+                    question,
+                    cfg=cfg,
+                    emit=emit,
+                    show_zydah=args.zydah,
+                    score_mode=args.score_mode,
+                    capture_zydah_view=args.verbose,
                 )
             except Exception as exc:
                 _log_error("live_call", exc)

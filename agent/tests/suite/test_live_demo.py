@@ -516,6 +516,81 @@ def test_render_result_zydah_view_shows_internal_frames():
     assert any("graph_conditioning:" in line for line in zydah_lines)
 
 
+def test_render_result_verbose_capture_logs_internal_view(caplog):
+    import logging
+
+    from zydah.fusion import make_mass
+
+    frame = frozenset({"pass", "partial", "fail"})
+    result = {
+        "verdict": "good",
+        "needs_human": False,
+        "followups": 1,
+        "history": [
+            {
+                "prompt": '{"question": "Need more info?"}',
+                "response": "Springfield, MA is cloudy today.",
+                "mass": make_mass(frame, {"pass": 0.9, frame: 0.1}),
+            }
+        ],
+        "graph_conditioning": {"support": ["Springfield, MA"]},
+    }
+    emitted = []
+
+    with caplog.at_level(logging.INFO, logger="zydah.live_demo"):
+        live_demo.render_result(
+            result,
+            emitted.append,
+            show_zydah=False,
+            capture_zydah_view=True,
+        )
+
+    assert len(emitted) == 2
+    assert not any("belief_frame" in line for line in emitted)
+    assert "[Prompt 1]" in caplog.text
+    assert "turn 1 belief_frame:" in caplog.text
+    assert '"pass": 0.9' in caplog.text
+    assert "graph_conditioning:" in caplog.text
+
+
+def test_thinking_elicitor_verbose_capture_logs_semaphore(caplog):
+    import logging
+
+    elicitor = live_demo._thinking_elicitor(
+        lambda evidence, frame, model_id: {"mass": True},
+        lambda line: None,
+        capture_zydah_view=True,
+    )
+
+    with caplog.at_level(logging.INFO, logger="zydah.live_demo"):
+        out = elicitor("evidence", frozenset({"pass"}), "m-test")
+
+    assert out == {"mass": True}
+    assert "[zydah] ...Thinking" in caplog.text
+
+
+def test_main_verbose_enables_capture_without_showing_zydah(monkeypatch):
+    seen = []
+
+    def fake_run_question(question, **kwargs):
+        seen.append(kwargs)
+        return (
+            {"verdict": "good", "needs_human": False, "followups": 0, "history": []},
+            object(),
+            "resp",
+        )
+
+    def no_terminal(prompt):
+        raise EOFError
+
+    monkeypatch.setattr(live_demo, "run_question", fake_run_question)
+    monkeypatch.setattr(live_demo, "terminal_input", no_terminal)
+
+    assert live_demo.main(["--verbose", "--question", "hi"]) == 0
+    assert seen[-1]["show_zydah"] is False
+    assert seen[-1]["capture_zydah_view"] is True
+
+
 def test_help_lists_zydah_flag(capsys):
     import pytest
 
@@ -884,7 +959,8 @@ def test_gate_question_is_sent_to_model_not_scored_as_direction(monkeypatch):
 
 def test_gate_q_marks_quit_so_main_can_say_bye(monkeypatch):
     """'q' at the gate is a quit, not a silent pause: it is flagged
-    so main exits with [zydah] bye instead of looping unscored."""
+    so main exits with [zydah] bye, keeping the checkpoint that was
+    scored when the response landed."""
     from omegaconf import OmegaConf
 
     cfg = OmegaConf.create(
@@ -895,10 +971,20 @@ def test_gate_q_marks_quit_so_main_can_say_bye(monkeypatch):
         }
     )
 
-    class StubVerifier(FakeVerifier):
-        def verify_direct(self, evidence, first_response=None, assumptions=None):
-            raise AssertionError("q at the gate must not reach scoring")
+    class CapturingVerifier(FakeVerifier):
+        def __init__(self):
+            self.calls = 0
 
+        def verify_direct(self, evidence, first_response=None, assumptions=None):
+            self.calls += 1
+            return {
+                "verdict": "good",
+                "needs_human": False,
+                "followups": 0,
+                "history": [],
+            }
+
+    verifier = CapturingVerifier()
     monkeypatch.setattr(
         live_demo,
         "stream_chat_complete",
@@ -906,7 +992,7 @@ def test_gate_q_marks_quit_so_main_can_say_bye(monkeypatch):
     )
     monkeypatch.setattr(live_demo, "_terminal_fd", lambda: None)
     monkeypatch.setattr(
-        live_demo, "build_verifier", lambda q, r, m, **kw: StubVerifier()
+        live_demo, "build_verifier", lambda q, r, m, **kw: verifier
     )
 
     result, _verifier, _response = live_demo.run_question(
@@ -916,7 +1002,8 @@ def test_gate_q_marks_quit_so_main_can_say_bye(monkeypatch):
         emit=lambda line: None,
     )
 
-    assert result["needs_human"] is True
+    assert verifier.calls == 1
+    assert result["verdict"] == "good"
     assert result["quit"] is True
 
 
@@ -940,3 +1027,230 @@ def test_main_says_bye_and_exits_on_gate_quit(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "[zydah] bye" in out
     assert "paused for human input" not in out
+
+
+def test_human_clue_conditions_graph_before_scoring(monkeypatch):
+    """A free-text clarification answer runs the relationship
+    resolver (HumanFollowup machinery) before Zydah scores: the
+    conditioning lands in the evidence and on the result."""
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.create(
+        {
+            "model": {"env_var": "LIVE_DEMO_TEST_MODEL", "id": "m-test"},
+            "human_question_markers": ["which"],
+            "max_iterations": 5,
+        }
+    )
+    answers = iter(
+        [
+            "Which Springfield do you mean?",
+            "It is cloudy in Springfield, MA today.",
+        ]
+    )
+
+    def fake_chat(prompt, model_id=None):
+        return iter([next(answers)])
+
+    class ConditioningVerifier(FakeVerifier):
+        def __init__(self):
+            super().__init__()
+            self.clues = []
+
+        def condition_on_human_text(self, text, question=""):
+            self.clues.append(text)
+            return {
+                "support": ["Springfield, MA"],
+                "text": "Graph resolution (conditioned): Springfield, MA",
+                "candidate_beliefs": {
+                    "Springfield, MA": {"A": 0.75, "not_A": 0.0, "omega": 0.25}
+                },
+            }
+
+        def verify_direct(self, evidence, first_response=None, assumptions=None):
+            self.evidence = evidence
+            return {
+                "verdict": "good",
+                "needs_human": False,
+                "followups": 0,
+                "history": [],
+            }
+
+    verifier = ConditioningVerifier()
+    monkeypatch.setattr(live_demo, "stream_chat_complete", fake_chat)
+    monkeypatch.setattr(live_demo, "_terminal_fd", lambda: None)
+    monkeypatch.setattr(
+        live_demo, "build_verifier", lambda q, r, m, **kw: verifier
+    )
+    typed = iter(["the celtics are a great team", ""])
+
+    final, _verifier, _response = live_demo.run_question(
+        "What is the weather in Springfield today?",
+        cfg=cfg,
+        ask=lambda prompt: next(typed),
+        emit=lambda line: None,
+    )
+
+    assert verifier.clues == ["the celtics are a great team"]
+    assert "Human clue conditioning:" in verifier.evidence
+    assert final["graph_conditioning"]["support"] == ["Springfield, MA"]
+
+
+def _checkpoint_cfg():
+    from omegaconf import OmegaConf
+
+    return OmegaConf.create(
+        {
+            "model": {"env_var": "LIVE_DEMO_TEST_MODEL", "id": "m-test"},
+            "human_question_markers": ["which"],
+            "max_iterations": 7,
+        }
+    )
+
+
+class _CheckpointVerifier(FakeVerifier):
+    def __init__(self):
+        super().__init__()
+        self.evidence_calls = []
+
+    def verify_direct(self, evidence, first_response=None, assumptions=None):
+        self.evidence_calls.append(evidence)
+        return {
+            "verdict": "good",
+            "needs_human": False,
+            "followups": 0,
+            "history": [],
+        }
+
+
+def _wire_checkpoint_demo(monkeypatch, verifier, model_answers):
+    prompts = []
+    answers = iter(model_answers)
+
+    def fake_chat(prompt, model_id=None):
+        prompts.append(prompt)
+        return iter([next(answers)])
+
+    monkeypatch.setattr(live_demo, "stream_chat_complete", fake_chat)
+    monkeypatch.setattr(live_demo, "_terminal_fd", lambda: None)
+    monkeypatch.setattr(
+        live_demo, "build_verifier", lambda q, r, m, **kw: verifier
+    )
+    return prompts
+
+
+def test_every_mode_scores_each_model_response(monkeypatch, caplog):
+    import logging
+
+    verifier = _CheckpointVerifier()
+    _wire_checkpoint_demo(
+        monkeypatch,
+        verifier,
+        [
+            "Hi, I'm Muse Spark!\n\nWhat did you want to know about today?",
+            "A cat is a **feline**.",
+        ],
+    )
+    typed = iter(["well a dog is a canine and a cat is a what?", ""])
+
+    with caplog.at_level(logging.INFO, logger="zydah.live_demo"):
+        final, _verifier, response = live_demo.run_question(
+            "what do you know today?",
+            cfg=_checkpoint_cfg(),
+            ask=lambda prompt: next(typed),
+            emit=lambda line: None,
+        )
+
+    assert response == "A cat is a **feline**."
+    assert len(verifier.evidence_calls) == 2
+    assert "Claim to evaluate: Hi, I'm Muse Spark!" in verifier.evidence_calls[0]
+    assert "Claim to evaluate: A cat is a **feline**." in verifier.evidence_calls[1]
+    assert caplog.text.count("zydah_json ") == 2
+    assert final["verdict"] == "good"
+
+
+def test_substantive_mode_skips_pure_question_but_scores_answer(
+    monkeypatch, caplog
+):
+    import logging
+
+    verifier = _CheckpointVerifier()
+    _wire_checkpoint_demo(
+        monkeypatch,
+        verifier,
+        [
+            "Hi, I'm Muse Spark!\n\nWhat did you want to know about today?",
+            "A cat is a **feline**.",
+        ],
+    )
+    typed = iter(["well a dog is a canine and a cat is a what?", ""])
+
+    with caplog.at_level(logging.INFO, logger="zydah.live_demo"):
+        live_demo.run_question(
+            "what do you know today?",
+            cfg=_checkpoint_cfg(),
+            ask=lambda prompt: next(typed),
+            emit=lambda line: None,
+            score_mode="substantive",
+        )
+
+    assert len(verifier.evidence_calls) == 1
+    assert "Claim to evaluate: A cat is a **feline**." in verifier.evidence_calls[0]
+    assert "zydah_unscored reason=pure_question mode=substantive" in caplog.text
+    assert caplog.text.count("zydah_json ") == 1
+
+
+def test_substantive_response_ending_in_question_is_substantive():
+    assert live_demo._is_substantive_response(
+        "It is cloudy in Springfield, MA today. Which Springfield did you mean?"
+    )
+    assert live_demo._is_substantive_response(
+        "Happy Wednesday!\n\n"
+        "* A dog is a **canine** (family Canidae)\n"
+        "* And a cat is a **feline** (family Felidae)!\n\n"
+        "What else do you want to explore?"
+    )
+    assert not live_demo._is_substantive_response(
+        "What did you want to know about today?"
+    )
+    assert not live_demo._is_substantive_response("")
+
+
+def test_gate_quit_keeps_prior_checkpoint(monkeypatch):
+    verifier = _CheckpointVerifier()
+    _wire_checkpoint_demo(
+        monkeypatch, verifier, ["Prince sang in the rain."]
+    )
+
+    result, _verifier, _response = live_demo.run_question(
+        "who sang in the rain?",
+        cfg=_checkpoint_cfg(),
+        ask=lambda prompt: "q",
+        emit=lambda line: None,
+    )
+
+    assert len(verifier.evidence_calls) == 1
+    assert result["verdict"] == "good"
+    assert result["quit"] is True
+
+
+def test_main_passes_score_mode(monkeypatch):
+    seen = []
+
+    def fake_run_question(question, **kwargs):
+        seen.append(kwargs["score_mode"])
+        return (
+            {"verdict": "good", "needs_human": False, "followups": 0, "history": []},
+            object(),
+            "resp",
+        )
+
+    def no_terminal(prompt):
+        raise EOFError
+
+    monkeypatch.setattr(live_demo, "run_question", fake_run_question)
+    monkeypatch.setattr(live_demo, "terminal_input", no_terminal)
+
+    assert live_demo.main(["--question", "hi"]) == 0
+    assert live_demo.main(["--score-mode", "substantive", "--question", "hi"]) == 0
+    assert seen == ["every", "substantive"]

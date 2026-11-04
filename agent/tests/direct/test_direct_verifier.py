@@ -701,3 +701,89 @@ def test_verify_direct_no_responder_returns_prompt():
     assert out["question"] in out["prompt"]
     assert out["prompt"] == json.dumps(out["followup"], indent=2)
     assert out["mode"] == "direct"
+
+
+def _graph_verifier(sent, responder=None, similarity_scorer=None):
+    def _responder(prompt, model_id):
+        sent.append(prompt)
+        return responder(prompt) if responder else ""
+
+    return ZydahVerifier(
+        FRAME,
+        responder=_responder if responder is not None else None,
+        mass_elicitor=SequenceElicitor([wide_mass()]),
+        graph_resolver=NumpyResolver(),
+        graph_factory=lambda evidence: build_place_graph(),
+        similarity_scorer=similarity_scorer,
+    )
+
+
+def test_human_text_state_mention_conditions_without_model():
+    sent = []
+    verifier = _graph_verifier(sent)
+    out = verifier.condition_on_human_text(
+        "it is the Massachusetts one",
+        question="What is the weather in Springfield today?",
+    )
+    assert out is not None
+    assert out["support"] == ["Springfield, MA"]
+    beliefs = out["candidate_beliefs"]
+    assert beliefs["Springfield, MA"]["A"] > beliefs["Springfield, IL"]["A"]
+    assert sent == []  # deterministic: no model call was needed
+
+
+def test_human_text_entity_clue_uses_model_relationship_answer():
+    sent = []
+
+    def responder(prompt):
+        return (
+            "Springfield, IL: no relationship to the Celtics.\n"
+            "Springfield, MA: the Celtics are Boston, Massachusetts; "
+            "same state relationship.\n"
+            "Springfield, MO: no relationship to the Celtics."
+        )
+
+    verifier = _graph_verifier(sent, responder=responder)
+    out = verifier.condition_on_human_text(
+        "the celtics are a good team",
+        question="What is the weather in Springfield today?",
+    )
+    assert out is not None
+    assert out["support"] == ["Springfield, MA"]
+    # The clue entered as an Other HumanFollowup JSON with questions.
+    followup = json.loads(sent[-1])
+    assert followup["human_choice"]["value"] == "the celtics are a good team"
+    assert followup["context"]["relationship_questions"]["Springfield, MA"]
+
+
+def test_human_text_negation_veto_beats_similarity():
+    sent = []
+    verifier = _graph_verifier(
+        sent, similarity_scorer=FakeSimilarityScorer(1.0)
+    )
+    out = verifier.condition_on_human_text(
+        "It is not the Massachusetts one. It is the Illinois one.",
+        question="What is the weather in Springfield today?",
+    )
+    assert out is not None
+    assert out["support"] == ["Springfield, IL"]
+
+
+def test_human_text_without_support_conditions_nothing():
+    sent = []
+    verifier = _graph_verifier(sent, responder=lambda prompt: "No relationship.")
+    out = verifier.condition_on_human_text(
+        "i am watching on tv",
+        question="What is the weather in Springfield today?",
+    )
+    assert out is None
+
+
+def test_human_text_without_resolver_conditions_nothing():
+    verifier = ZydahVerifier(
+        FRAME, mass_elicitor=SequenceElicitor([wide_mass()])
+    )
+    assert (
+        verifier.condition_on_human_text("it is the Massachusetts one")
+        is None
+    )

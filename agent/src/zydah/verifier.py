@@ -621,7 +621,11 @@ class ZydahVerifier:
         }
 
     def _relationship_conditioning(
-        self, answer: object, followup: HumanFollowup
+        self,
+        answer: object,
+        followup: HumanFollowup,
+        alpha_key: str = "conditioning_alpha",
+        source: str = "model relationship answer",
     ) -> Optional[Dict]:
         """Condition the graph on the model's relationship answer.
 
@@ -687,6 +691,19 @@ class ZydahVerifier:
             lowered = _normalized(haystack)
             return any(
                 _normalized(marker) in lowered for marker in affirmatives
+            )
+
+        negation_patterns = [
+            r"n't" if word == "n't" else rf"\b{re.escape(word)}\b"
+            for word in (
+                OmegaConf.select(self.cfg, "clause_negation_words") or []
+            )
+        ]
+
+        def is_negated(clause: str) -> bool:
+            lowered = clause.lower()
+            return any(
+                re.search(pattern, lowered) for pattern in negation_patterns
             )
 
         original = ""
@@ -769,6 +786,7 @@ class ZydahVerifier:
                     for clause in evidence_clauses
                     if mentions(node, clause)
                     and not is_negative(clause)
+                    and not is_negated(clause)
                     and (is_affirmative(clause) or spelled_mention(clause))
                 ]
                 if matched_clauses:
@@ -811,7 +829,7 @@ class ZydahVerifier:
         }
         resolution = self.graph_resolver.resolve(graph)  # type: ignore[attr-defined]
         conditioned = self._condition_resolution(
-            resolution, set(support), alpha_key="conditioning_alpha"
+            resolution, set(support), alpha_key=alpha_key
         )
         label_mass = {
             frozenset(all_labels[cid] for cid in focal): float(value)
@@ -827,13 +845,59 @@ class ZydahVerifier:
                 conditioned, all_labels
             ),
             "text": (
-                "Conditioned on model relationship answer: "
+                f"Conditioned on {source}: "
                 f"{self._resolution_text(conditioned)}"
             ),
         }
         if similarity_scores is not None:
             result["similarity_scores"] = similarity_scores
         return result
+
+    def condition_on_human_text(
+        self, text: str, question: str = ""
+    ) -> Optional[Dict]:
+        """Condition candidate beliefs on a human's free-text clue.
+
+        The structured Other path, entered from any human free text
+        instead of a paused choice: the clue is wrapped in a
+        ``HumanFollowup`` JSON whose context carries the candidates
+        and per-candidate relationship questions. The polarity gate
+        runs on the human's own text first — System 1 markers veto
+        negated candidates before MiniLM ever scores, at human
+        alpha. Only when the text itself names no support does the
+        followup go to the model, whose relationship answer is
+        conditioned at model alpha. Returns the conditioning dict
+        (support, belief_frame, candidate_beliefs, text) or None
+        when nothing can be conditioned.
+        """
+        if self.graph_resolver is None or self.graph_factory is None:
+            return None
+        if not text or not str(text).strip():
+            return None
+        clue = str(text).strip()
+        context = self._other_context(
+            {"original_question": question, "choices": []}, clue
+        )
+        followup = HumanFollowup(
+            human_choice=HumanChoice(key=ChoiceKey.E, value=clue),
+            context=context,
+        )
+        direct = self._relationship_conditioning(
+            clue,
+            followup,
+            alpha_key="human_choice_alpha",
+            source="human free-text clue",
+        )
+        if direct is not None:
+            return direct
+        if self.responder is None:
+            return None
+        answer = self.responder(
+            followup.model_dump_json(indent=2), self.model_id
+        )
+        if not answer or not str(answer).strip():
+            return None
+        return self._relationship_conditioning(answer, followup)
 
     def resume_direct(
         self,
