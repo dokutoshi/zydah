@@ -16,6 +16,8 @@ sync (the sidebar wins interactively):
     --panel-source yaml|base          judges from conf/panel.yaml
                                       (default) or the hardcoded
                                       Wonder/Spark/Spark Open models
+    --panel-model <model>             override every judge seat's
+                                      model (implies --panel-scoring)
     --score-mode every|substantive    score every response, or only
                                       substantive ones (demo semantics)
     --show-frames                     belief-frame JSON + follow-up
@@ -184,6 +186,7 @@ def _cli_options() -> argparse.Namespace:
     parser.add_argument("--no-zydah-panel", action="store_true")
     parser.add_argument("--panel-scoring", action="store_true")
     parser.add_argument("--panel-source", type=str, default="yaml")
+    parser.add_argument("--panel-model", type=str, default=None)
     parser.add_argument("--score-mode", type=str, default="every")
     parser.add_argument("--show-frames", action="store_true")
     parser.add_argument("--show-usage", action="store_true")
@@ -198,6 +201,13 @@ def _cli_options() -> argparse.Namespace:
         if args.score_mode in ("every", "substantive")
         else "every"
     )
+    args.panel_model = (
+        args.panel_model.strip()
+        if isinstance(args.panel_model, str) and args.panel_model.strip()
+        else None
+    )
+    if args.panel_model:
+        args.panel_scoring = True
     args.mock_path: Optional[Path] = None
     if args.mock_artifact:
         candidate = Path(args.mock_artifact)
@@ -522,17 +532,35 @@ def _load_mock_exchange(
     return _default_mock_exchange(muse_turn, cfg)
 
 
-def _build_panel(panel_source: str):
-    """3-judge LivePanel from panel.yaml or the hardcoded base models."""
+def _build_panel(panel_source: str, panel_model: Optional[str] = None):
+    """3-judge LivePanel from panel.yaml or the hardcoded base models.
+
+    ``panel_model`` overrides the model in every judge seat for this
+    run, preserving judge names and configured effort.
+    """
     from zydah.judges import PANEL, LivePanel, MetaApiJudge, load_panel_config
 
     if panel_source == "base":
+        names = ("wonder", "spark", "spark-open")
         return LivePanel(
             FRAME,
-            judges=[MetaApiJudge(model) for model in PANEL],
+            judges=[
+                MetaApiJudge(panel_model or model, name=name)
+                for model, name in zip(PANEL, names)
+            ],
             quorum=load_panel_config().quorum,
         )
-    return LivePanel.from_config(load_panel_config(), FRAME)
+    config = load_panel_config()
+    if panel_model:
+        config = config.model_copy(
+            update={
+                "judges": [
+                    judge.model_copy(update={"model": panel_model})
+                    for judge in config.judges
+                ]
+            }
+        )
+    return LivePanel.from_config(config, FRAME)
 
 
 def _build_verifier(
@@ -541,6 +569,7 @@ def _build_verifier(
     model_id: str,
     panel_scoring: bool = False,
     panel_source: str = "yaml",
+    panel_model: Optional[str] = None,
 ) -> ZydahVerifier:
     """Live verifier wiring, mirroring live_demo.build_verifier.
 
@@ -567,7 +596,7 @@ def _build_verifier(
         )
     return ZydahVerifier(
         FRAME,
-        panel=_build_panel(panel_source) if panel_scoring else None,
+        panel=_build_panel(panel_source, panel_model) if panel_scoring else None,
         responder=make_model_responder(),
         mass_elicitor=make_mass_elicitor(
             str(_cfg_value(cfg, "direct_mass_prompt_template"))
@@ -659,6 +688,11 @@ def _run_live(
         model_id,
         panel_scoring=panel_scoring,
         panel_source=str(settings.get("panel_source", "yaml")),
+        panel_model=(
+            str(settings["panel_model"])
+            if settings.get("panel_model")
+            else None
+        ),
     )
     first = capture_first_response(
         text=muse_text,
@@ -1046,10 +1080,10 @@ def _render_exchange(exchange: Mapping, is_pending: bool) -> None:
                                 if idx < len(judges)  # type: ignore[arg-type]
                                 else {}
                             )
-                            name = judge.get("name") or f"judge-{idx + 1}"  # type: ignore[union-attr]
-                            model = judge.get("model") or ""  # type: ignore[union-attr]
+                            tag = judge.get("tag") or f"ZJ-{idx + 1:02d}"  # type: ignore[union-attr]
+                            seat = judge.get("seat") or judge.get("model") or ""  # type: ignore[union-attr]
                             st.markdown(
-                                f"judge {name} ({model}) belief_frame:"
+                                f"judge {tag} (seat {seat}) belief_frame:"
                             )
                             _render_json_value(judge_frame)
                     if turn.get("prompt"):
@@ -1132,6 +1166,15 @@ def _sidebar(cfg, mock: bool, cli) -> Optional[Path]:
             disabled=not panel_on,
             help="Judges from conf/panel.yaml, or the hardcoded "
             "Wonder/Spark/Spark Open models (--panel-source).",
+        )
+        st.text_input(
+            "Panel model",
+            value=cli.panel_model or "",
+            key="panel_model",
+            disabled=not panel_on,
+            help="Override every judge seat's model for this run "
+            "(--panel-model muse-spark). Names, sessions, and effort "
+            "are preserved.",
         )
         st.selectbox(
             "Score mode",
@@ -1242,11 +1285,15 @@ def main() -> None:
             st.session_state["exchanges"] = [seeded]
             st.session_state["muse_counter"] = 1
 
+    panel_model_value = str(
+        st.session_state.get("panel_model", cli.panel_model or "")
+    ).strip()
     settings = {
         "panel_scoring": bool(
             st.session_state.get("panel_scoring", cli.panel_scoring)
         ),
         "panel_source": st.session_state.get("panel_source", cli.panel_source),
+        "panel_model": panel_model_value or None,
         "score_mode": st.session_state.get("score_mode", cli.score_mode),
     }
     show_panel = bool(
