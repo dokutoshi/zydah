@@ -1,7 +1,7 @@
-"""Offline TD(0)/Monte-Carlo learner over verifier trajectories.
+"""Offline temporal-difference TD(0)/Monte-Carlo learner over trajectories.
 
-Ports the ``update_td`` update verbatim from SAB Blackjack (also
-in gym) onto Zydah's discretized routing states. The Q function stays tabular (dict state
+Ports the ``update_td`` temporal-difference update verbatim from SAB
+Blackjack onto Zydah's discretized routing states. The Q function stays tabular (dict state
 key -> per-action values); Bellman/gamma/lr/costs come from
 ``conf/bellman.yaml``. Episodes are capped JSONL logs; chaining is
 sorted by (episode_id, step) and the last row of an episode is
@@ -19,6 +19,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from omegaconf import DictConfig
 
 from zydah.trajectory import (
+    ACTION_ASK_HUMAN,
     ACTION_COMMIT,
     load_bellman_config,
     state_key,
@@ -51,6 +52,18 @@ class QTable:
         return max(self.ensure(state).values())
 
     def greedy(self, state: Tuple[int, ...]) -> str:
+        """Greedy action, with an ask-human fallback for no evidence.
+
+        An unseen state, or a visited state whose best Q is not
+        positive, has no learned basis for committing. When ask-human
+        is an available action it is the safe fallback; action order
+        alone must never turn an untrained bucket into a commit.
+        """
+        key = state_key(state)
+        values = self.table.get(key)
+        if values is None or max(values.values(), default=0.0) <= 0.0:
+            if ACTION_ASK_HUMAN in self.actions:
+                return ACTION_ASK_HUMAN
         return greedy_action(self.q_values(state), self.actions)
 
     def q_values(self, state: Tuple[int, ...]) -> Dict[str, float]:

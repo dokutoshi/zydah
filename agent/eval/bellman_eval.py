@@ -1,13 +1,14 @@
-"""Bellman policy comparison: pi_0 vs offline TD vs offline MC.
+"""Synthetic Bellman smoke check (not policy evidence).
 
 Static harness items (``{"id", "reference", "runs": [[Mass, ...]]}``)
 give single-step episodes: the fused state is observed, one routing
 action is taken, and correctness comes from the item's reference label
 (the independent oracle — never the verifier's verdict). Follow-up
 actions cannot change static masses, so non-commit actions abstain at
-their configured cost; the learnable question is exactly the routing
-one: which buckets are safe to commit. Multi-step episodes need live
-trajectory logs (``outputs/live_demo/cycles.jsonl``).
+their configured cost. This fixture exercises learner arithmetic on a
+separable synthetic set only; it does not show that temporal-difference
+routing is learnable or better than the threshold policy. Multi-step
+episodes need live trajectory logs (``outputs/live_demo/cycles.jsonl``).
 """
 
 from __future__ import annotations
@@ -144,11 +145,12 @@ def compare_policies(
 
 
 def synthetic_items(n: int = 40, seed: int = 0) -> List[Dict[str, object]]:
-    """Deterministic separable set: confident-but-wrong vs hedged-right.
+    """Deterministic separable smoke fixture (labels follow width bucket).
 
     Confident items (width in the lowest bucket) carry a wrong reference;
-    hedged items (width in the next bucket) carry a right one. pi_0
-    commits both; a learner can separate them by bucket.
+    hedged items (width in the next bucket) carry a right one. Because
+    the label is a function of the bucket, separation is by construction
+    and proves arithmetic only, not learnability.
     """
     rng = random.Random(seed)
     items: List[Dict[str, object]] = []
@@ -170,7 +172,7 @@ def synthetic_items(n: int = 40, seed: int = 0) -> List[Dict[str, object]]:
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Compare pi_0 vs TD vs MC routing.")
+    parser = argparse.ArgumentParser(description="Run the synthetic Bellman smoke check (not policy evidence).")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--n", type=int, default=40)
     parser.add_argument("--seed", type=int, default=0)

@@ -7,7 +7,7 @@
 width_edges: [0.1, 0.35, 0.7]
 conflict_edges: [0.1, 0.35, 0.7]
 
-# Q-learning (ported TD/MC learner).
+# Q-learning (ported temporal-difference TD / Monte-Carlo learner).
 gamma: 0.95
 learning_rate: 0.05
 epsilon_start: 1.0

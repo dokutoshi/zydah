@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from zydah.td import QTable, greedy_action, load_episodes, train, update_td
+from zydah.td import QTable, greedy_action, load_episodes, train, update_mc, update_td
 from zydah.trajectory import bucket_state, load_bellman_config, state_key
 
 # Golden Q after the reference update sequence (hand-checked against
@@ -101,6 +101,28 @@ def test_mc_wrong_commit_negative_and_costs():
     assert q.table[state]["commit"] < 0
     # model-followup pays lambda * 1 before the bad return
     assert q.table[state]["model-followup"] < 0
+
+
+def test_greedy_unseen_and_zero_states_ask_human():
+    cfg = load_bellman_config()
+    q = QTable(list(cfg.actions))
+
+    assert q.greedy((9, 9, 9, 9)) == "ask-human"
+    q.ensure((0, 0, 0, 0))
+    assert q.greedy((0, 0, 0, 0)) == "ask-human"
+
+
+def test_td_bootstraps_from_nonzero_next_state():
+    cfg = load_bellman_config()
+    q = QTable(list(cfg.actions))
+    state, next_state = (0, 0, 0, 0), (1, 0, 0, 0)
+    q.ensure(next_state)["commit"] = 1.0
+
+    update_td(q, state, "model-followup", 0.0, next_state, 0.95, 0.05)
+    update_mc(q, state, "ask-human", 0.0, 0.05)
+
+    assert q.q(state, "model-followup") == pytest.approx(0.0475)
+    assert q.q(state, "ask-human") == 0.0
 
 
 def test_greedy_tie_break_and_episode_loading(tmp_path: Path):
