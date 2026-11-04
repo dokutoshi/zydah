@@ -1,0 +1,12 @@
+# Judge panel (OmegaConf YAML, validated via zydah.judges.PanelConfig).
+# v1 quorum: 2 of 3 judges must return a mass for a cycle to fuse.
+quorum: 2
+# Default reasoning effort for judges (pydantic default: low).
+effort: low
+judges:
+  - name: wonder
+    model: muse-wonder
+  - name: spark
+    model: muse-spark
+  - name: spark-open
+    model: muse-spark-open

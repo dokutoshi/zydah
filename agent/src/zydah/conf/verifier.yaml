@@ -37,6 +37,12 @@ direct_mass_prompt_template: |
   You are an expert evaluator. Assess the evidence below against the
   labels {labels}.
 
+  Label meanings: pass = the evidence supports the claim; partial =
+  the evidence partly supports and partly contradicts the claim, or
+  covers only part of it; fail = the evidence contradicts the claim;
+  omega = the evidence is insufficient to decide. Do not use fail
+  merely because a claim is unproven: unproven means omega.
+
   Return ONLY a JSON object mapping each label to a probability mass,
   plus an "omega" key for your ignorance (mass you cannot commit to any
   label). Masses must be non-negative numbers summing to 1.
