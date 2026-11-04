@@ -16,9 +16,10 @@ run verification, then pair them with ``seal_cycle`` and render with
 cannot be revised from verifier output. ``format_tagged`` remains only
 a lower-level formatter for pre-shaped verdict dictionaries.
 
-Panel defaults to ``SeededMockPanel`` (deterministic, no API calls) until
-live judge transport lands; any object with
-``elicit(item_id, run) -> List[Mass]`` can be injected.
+Panels are always explicit: any object with
+``elicit(item_id, run) -> List[Mass]`` can be injected (a live panel, or
+``SeededMockPanel`` for deterministic offline use). There is no
+implicit mock fallback.
 """
 
 from __future__ import annotations
@@ -37,7 +38,6 @@ from zydah.fusion import (
     pignistic,
     yager_combine,
 )
-from zydah.judges import SeededMockPanel
 from zydah.router import TAU_GENERAL, decide_best
 
 DIRECT_TAG = "muse"
@@ -164,6 +164,18 @@ def direct_verdict(masses: Sequence[Mass], frame: FrozenSet[str]) -> Dict:
     return {"verdict": _argmax(dist), "pignistic": dist}
 
 
+def fuse_masses(
+    masses: Sequence[Mass], frame: FrozenSet[str], rule: str = "yager"
+) -> Mass:
+    """Combine judge masses into the fused mass (no decision applied)."""
+    frame = frozenset(frame)
+    if rule == "yager":
+        return yager_combine(masses, frame)
+    if rule == "tbm":
+        return conjunctive_combine(masses, frame)
+    raise ValueError(f"unknown fusion rule {rule!r} (expected 'yager' or 'tbm')")
+
+
 def fused_verdict(
     masses: Sequence[Mass],
     frame: FrozenSet[str],
@@ -177,10 +189,10 @@ def fused_verdict(
     """
     frame = frozenset(frame)
     if rule == "yager":
-        fused = yager_combine(masses, frame)
+        fused = fuse_masses(masses, frame, rule)
         kappa = conflict_mass(masses, frame)
     elif rule == "tbm":
-        fused = conjunctive_combine(masses, frame)
+        fused = fuse_masses(masses, frame, rule)
         kappa = fused.get(EMPTY, 0.0)
     else:
         raise ValueError(f"unknown fusion rule {rule!r} (expected 'yager' or 'tbm')")
@@ -212,19 +224,19 @@ def fused_verdict(
 def fuse_response(
     evidence: str,
     frame: FrozenSet[str],
-    panel: Optional[object] = None,
+    panel: object,
     tau: float = TAU_GENERAL,
     rule: str = "yager",
     run: int = 0,
 ) -> Dict:
     """Pipe evidence through both arms; return ``{"muse": ..., "zydah": ...}``.
 
-    The mock panel seeds per (seed, evidence, run, judge), so the same
-    evidence always yields the same result. Any object with
-    ``elicit(item_id, run) -> List[Mass]`` works as the panel.
+    A panel is required: any object with
+    ``elicit(item_id, run) -> List[Mass]`` works. For deterministic
+    offline use, pass ``SeededMockPanel(frame, seed=0)`` explicitly —
+    there is no implicit mock fallback.
     """
     frame = frozenset(frame)
-    panel = panel if panel is not None else SeededMockPanel(frame, seed=0)
     masses: List[Mass] = panel.elicit(item_id=evidence, run=run)  # type: ignore[attr-defined]
     if not masses:
         raise ValueError("panel returned no judge masses")
