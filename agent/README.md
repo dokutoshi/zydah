@@ -50,15 +50,27 @@ Heterogeneous panel via structured JSON masses incl. m(Ω):
 
 - Muse Wonder (Meta Model API)
 - Muse Spark (Meta Model API)
-- Muse Spark Open via Baseten (`meta-models/muse-spark-open-1026`)
+- Muse Spark Open (Meta Model API; a Baseten-hosted route exists as
+  an explicitly constructed judge, not a config default)
 
-Keys come from environment variables (`META_API_KEY`, `BASETEN_API_KEY`).
-Never commit secrets. Unit tests use a seeded mock panel — no API calls.
+The panel is configured in `src/zydah/conf/panel.yaml`, validated
+through the pydantic `PanelConfig` interface in `src/zydah/judges.py`.
+The judges list is required — misconfiguration fails validation, with
+no hardcoded fallback. A judge entry without a model defaults to
+Spark; effort defaults to low. Panel v1 quorum is 2 of 3: one judge
+failure is recorded and tolerated, below quorum the cycle raises.
+Each judge runs under its own session id (provenance labels on the
+stateless transport).
+
+Keys come from environment variables. Never commit secrets. Unit
+tests inject a seeded mock panel explicitly — no API calls, and no
+implicit mock mode in production paths.
 
 ## Layout
 
 - `src/zydah/fusion.py` — mass functions, Dempster / Yager / TBM, Bel, Pl, conflict K
-- `src/zydah/judges.py` — panel interface, JSON mass parsing, mock + Meta clients
+- `src/zydah/judges.py` — panel interface (`PanelConfig`, quorum, sessions), JSON mass parsing, mock + Meta clients
+- `src/zydah/conf/panel.yaml` — judge panel configuration (validated via pydantic)
 - `src/zydah/router.py` — interval-based decision + escalation policy
 - `src/zydah/interface.py` — [muse] direct / [zydah] fused pipe-through API
 - `src/zydah/verifier.py` — System 2 verifier loop (Hydra/OmegaConf YAML config)
@@ -91,7 +103,20 @@ uv run python tools/live_demo.py --zydah --save outputs/live_demo/latest.json
 uv run python tools/live_demo.py --verbose
 uv run python tools/live_demo.py --log-file trace.log
 uv run python tools/live_demo.py --score-mode substantive --log-file trace.log
+uv run python tools/live_demo.py --zydah-panel --zydah --log-file trace.log --save outputs/live_demo/latest.json
+uv run python tools/live_demo.py --zydah-panel --panel-source base --zydah
 ```
+
+Turns are labeled: `[muse turn N]` is the Nth model response and
+`[zydah turn N]` its score (verdict line carries per-turn seconds and
+token usage). `--zydah-panel` scores with the 3-judge panel instead
+of the single elicitor; `--panel-source` selects where the judges
+come from — `yaml` (default, `conf/panel.yaml`) or `base` (the
+hardcoded Wonder/Spark/Spark Open models). With `--zydah`, each
+panel turn also prints a per-judge table (mass per label) and the
+fused Bel/Pl/width/conflict; the same data is logged as a compact
+`panel_json` record (per judge: model, session id, mass, pignistic)
+for downstream viewers such as Streamlit.
 
 At the prompts:
 
