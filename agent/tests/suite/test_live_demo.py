@@ -1254,3 +1254,48 @@ def test_main_passes_score_mode(monkeypatch):
     assert live_demo.main(["--question", "hi"]) == 0
     assert live_demo.main(["--score-mode", "substantive", "--question", "hi"]) == 0
     assert seen == ["every", "substantive"]
+
+
+def test_artifact_turns_carry_interval_decision_fields():
+    from zydah.fusion import make_mass
+
+    frame = frozenset({"pass", "partial", "fail"})
+    result = {
+        "verdict": "good",
+        "needs_human": False,
+        "followups": 0,
+        "history": [
+            {
+                "mass": make_mass(
+                    frame,
+                    {"pass": 0.65, "partial": 0.10, "fail": 0.05, frame: 0.2},
+                ),
+                "zydah": {
+                    "bel": 0.65,
+                    "pl": 0.85,
+                    "width": 0.2,
+                    "conflict": 0.0,
+                    "decision": "escalate",
+                },
+            }
+        ],
+    }
+    artifact = live_demo.artifact_for("q?", "a.", result)
+    turn = artifact["turns"][0]
+    assert turn["bel"] == 0.65
+    assert turn["pl"] == 0.85
+    assert turn["width"] == 0.2
+    assert turn["conflict"] == 0.0
+    assert turn["decision"] == "escalate"
+
+
+def test_build_verifier_enables_jsonl_cycle_log(monkeypatch):
+    captured = {}
+
+    class FakeVerifier:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(live_demo, "ZydahVerifier", FakeVerifier)
+    live_demo.build_verifier("hello?", "hi.", "m-test", emit=lambda line: None)
+    assert captured["log_path"] == live_demo.VERIFIER_LOG

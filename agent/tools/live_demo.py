@@ -20,9 +20,12 @@ default. No secret values are printed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import subprocess
+from datetime import datetime, timezone
 import queue
 import re
 import select
@@ -72,6 +75,7 @@ def _is_quit(text: str) -> bool:
 
 
 ERROR_LOG = REPO_ROOT / "outputs" / "live_demo" / "errors.log"
+VERIFIER_LOG = REPO_ROOT / "outputs" / "live_demo" / "cycles.jsonl"
 
 
 def _log_error(context: str, exc: Exception, path: Path = ERROR_LOG) -> None:
@@ -403,6 +407,12 @@ def _thinking_elicitor(
     return elicitor
 
 
+def _verifier_log_path() -> Path:
+    """Verifier JSONL cycle log for the demo (created on demand)."""
+    VERIFIER_LOG.parent.mkdir(parents=True, exist_ok=True)
+    return VERIFIER_LOG
+
+
 def build_verifier(
     question: str,
     response: str,
@@ -441,6 +451,7 @@ def build_verifier(
         graph_factory=graph_factory,
         similarity_scorer=similarity_scorer,
         session_id=f"demo-verifier-{uuid.uuid4().hex[:8]}",
+        log_path=_verifier_log_path(),
     )
 
 
@@ -619,6 +630,11 @@ def artifact_for(question: str, response: str, result: Mapping[str, object]) -> 
         turn = {"turn": idx}
         if "mass" in entry:
             turn["belief_frame"] = belief_frame(entry["mass"], FRAME)  # type: ignore[arg-type]
+        zydah_entry = entry.get("zydah")
+        if isinstance(zydah_entry, Mapping):
+            for key in ("bel", "pl", "width", "conflict", "decision"):
+                if key in zydah_entry:
+                    turn[key] = zydah_entry[key]
         if entry.get("response"):
             turn["response"] = entry["response"]
         if entry.get("followup"):
@@ -1128,6 +1144,57 @@ def run_question(
     return final, verifier, response
 
 
+def _append_manifest(save_path: Path, result: Mapping[str, object]) -> None:
+    """Append one audit entry for a saved artifact (best effort).
+
+    The manifest is the rerun record for outputs/: which artifact,
+    its hash, the git state and wall-clock time that produced it,
+    the scoring conditions (thresholds/model from YAML), and the
+    verdict summary. Never raises; failures go to the error log.
+    """
+    try:
+        data = save_path.read_bytes()
+        try:
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+                cwd=str(REPO_ROOT),
+            ).stdout.strip()
+            branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                capture_output=True, text=True, timeout=5,
+                cwd=str(REPO_ROOT),
+            ).stdout.strip()
+        except Exception:
+            commit, branch = "", ""
+        cfg = load_verifier_config()
+        entry = {
+            "artifact": str(save_path),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "git_commit": commit,
+            "branch": branch,
+            "run_date": datetime.now(timezone.utc).isoformat(),
+            "score_mode": result.get("score_mode"),
+            "model_id": result.get("model_id"),
+            "config": {
+                "tau": cfg.get("tau"),
+                "width_threshold": cfg.get("width_threshold"),
+                "conflict_threshold": cfg.get("conflict_threshold"),
+                "max_iterations": cfg.get("max_iterations"),
+            },
+            "verdict": result.get("verdict"),
+            "needs_human": result.get("needs_human", False),
+            "followups": result.get("followups", 0),
+            "backfilled": False,
+        }
+        manifest = save_path.parent / "manifest.jsonl"
+        with open(manifest, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+        logger.info("manifest entry appended: %s", manifest)
+    except Exception as exc:  # manifest must never break the demo
+        _log_error("manifest", exc)
+
+
 def after_verdict(
     result: Mapping[str, object],
     *,
@@ -1152,6 +1219,8 @@ def after_verdict(
         return
     if tee is not None:
         tee.finish(question, response, result)
+        if save_path is not None:
+            _append_manifest(Path(save_path), result)
         emit(f"saved: {save_path}")
     emit(RESOLVED_INVITE)
 
