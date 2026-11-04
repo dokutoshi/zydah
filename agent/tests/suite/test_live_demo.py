@@ -69,6 +69,42 @@ def test_render_result_leads_with_final_response_then_verdict():
     assert emitted[1].startswith("verdict=good")
 
 
+def test_render_result_verdict_line_carries_usage_suffix():
+    emitted = []
+    result = {
+        "verdict": "good",
+        "needs_human": False,
+        "followups": 0,
+        "history": [],
+        "usage": {
+            "calls": 2,
+            "elapsed_s": 1.234,
+            "tokens_in": 10,
+            "tokens_out": 5,
+        },
+    }
+
+    live_demo.render_result(result, emitted.append)
+
+    assert emitted[1].startswith("verdict=good")
+    assert "1.23s" in emitted[1]
+    assert "15 tok" in emitted[1]
+
+
+def test_render_result_labels_zydah_turn_when_turn_given():
+    emitted = []
+    result = {
+        "verdict": "good",
+        "needs_human": False,
+        "followups": 0,
+        "history": [],
+    }
+
+    live_demo.render_result(result, emitted.append, turn=2)
+
+    assert emitted[0].startswith("[zydah turn 2] ")
+
+
 def test_pause_without_choices_returns_without_resuming():
     paused = {
         "verdict": False,
@@ -206,14 +242,17 @@ def test_model_question_prompts_human_then_continues(monkeypatch, capsys):
 
     assert response == "Springfield, MA is cloudy today."
     assert "...Thinking" in emitted
-    # Call-tree order: [zydah] prints after [muse], before [human].
+    # Turn labels pair each [muse turn N] with its [zydah turn N]. The
+    # clarification preamble is queued as zydah turn 2, so it dequeues
+    # only after the [muse turn 2] header has printed.
+    assert "[muse turn 1]" in emitted
+    muse2_idx = emitted.index("[muse turn 2]")
     zydah_idx = next(
-        i for i, line in enumerate(emitted) if line.startswith("[zydah] the model needs")
+        i
+        for i, line in enumerate(emitted)
+        if line.startswith("[zydah turn 2] the model needs")
     )
-    human_idx = next(
-        i for i, line in enumerate(emitted) if line.startswith("[human]")
-    )
-    assert zydah_idx < human_idx
+    assert muse2_idx < zydah_idx
     assert "Human answer: the celtics are a great team" in verifier.evidence
     # Streamed lines go through the same emit channel as the JSON.
     assert any(
@@ -409,6 +448,26 @@ def test_terminal_box_does_not_prefix_streamed_output():
     assert "[you]" not in rendered
 
 
+def test_turn_sequencer_dequeues_muse_before_zydah_same_turn():
+    emitted = []
+    seq = live_demo.TurnSequencer(emitted.append)
+
+    seq("[zydah turn 2] the model needs one detail before I can conclude.")
+    seq("plain line passes through")
+    seq("[muse turn 2]")
+    seq("[zydah turn 2] the response checks out.")
+    seq("[zydah turn 3] orphaned until flush")
+
+    assert emitted == [
+        "plain line passes through",
+        "[muse turn 2]",
+        "[zydah turn 2] the model needs one detail before I can conclude.",
+        "[zydah turn 2] the response checks out.",
+    ]
+    seq.flush_pending()
+    assert emitted[-1] == "[zydah turn 3] orphaned until flush"
+
+
 def test_terminal_box_handles_iterm_bracketed_paste():
     import io
     import os
@@ -456,6 +515,20 @@ def test_final_line_follows_dominant_mass_not_validator_label():
     assert emitted[1].startswith("verdict=good")
 
 
+def test_streaming_responder_labels_model_identity(monkeypatch):
+    monkeypatch.setattr(
+        live_demo,
+        "stream_chat_complete",
+        lambda prompt, model_id=None: iter(["Follow-up text."]),
+    )
+    emitted = []
+    responder = live_demo._streaming_responder(emitted.append)
+
+    assert responder("prompt", "muse-spark-1.3") == "Follow-up text."
+    assert emitted[0] == "...Thinking"
+    assert emitted[1] == "[muse responder muse-spark-1.3]"
+
+
 def test_empty_stream_falls_back_to_plain_call(monkeypatch):
     monkeypatch.setattr(
         live_demo, "stream_chat_complete", lambda prompt, model_id=None: iter([])
@@ -500,6 +573,8 @@ def test_render_result_zydah_view_shows_internal_frames():
             {
                 "zydah": {"pignistic": {"pass": 0.9, "fail": 0.05, "partial": 0.05}},
                 "mass": make_mass(frame, {"pass": 0.9, frame: 0.1}),
+                "score_turn": 1,
+                "iteration": 1,
             }
         ],
         "graph_conditioning": {"support": ["Springfield, MA"]},
@@ -512,8 +587,94 @@ def test_render_result_zydah_view_shows_internal_frames():
     zydah_lines = []
     live_demo.render_result(result, zydah_lines.append, show_zydah=True)
     assert zydah_lines[0] == "[zydah] you are asking about Springfield, MA."
-    assert any("turn 1 belief_frame:" in line for line in zydah_lines)
+    # Terminal frames render as Rich tables (log keeps plain JSON).
+    rendered = "\n".join(zydah_lines)
+    assert "turn 1 iteration 1 belief_frame" in rendered
+    assert "0.900" in rendered
     assert any("graph_conditioning:" in line for line in zydah_lines)
+
+
+def test_internal_view_labels_frames_by_score_turn_and_iteration():
+    from zydah.fusion import make_mass
+
+    frame = frozenset({"pass", "partial", "fail"})
+    result = {
+        "history": [
+            {
+                "mass": make_mass(frame, {"pass": 0.5, frame: 0.5}),
+                "score_turn": 1,
+                "iteration": 1,
+            },
+            {
+                "mass": make_mass(frame, {"pass": 0.8, frame: 0.2}),
+                "score_turn": 1,
+                "iteration": 2,
+            },
+            {"mass": make_mass(frame, {"pass": 0.9, frame: 0.1})},
+        ]
+    }
+
+    lines = live_demo._internal_view_lines(result)
+
+    assert "turn 1 iteration 1 belief_frame:" in lines
+    assert "turn 1 iteration 2 belief_frame:" in lines
+    assert "history 3 belief_frame:" in lines
+    assert not any(line.startswith("turn 2 ") for line in lines)
+    assert not any(line.startswith("turn 3 ") for line in lines)
+
+
+def test_one_score_with_internal_iterations_keeps_muse_turn_one(monkeypatch):
+    from omegaconf import OmegaConf
+    from zydah.fusion import make_mass
+
+    frame = frozenset({"pass", "partial", "fail"})
+    cfg = OmegaConf.create(
+        {
+            "model": {"env_var": "LIVE_DEMO_TEST_MODEL", "id": "m-test"},
+            "human_question_markers": ["which"],
+        }
+    )
+
+    def fake_chat(prompt, model_id=None):
+        return iter(["A solid answer."])
+
+    class IteratingVerifier(FakeVerifier):
+        def verify_direct(self, evidence, first_response=None, assumptions=None):
+            return {
+                "verdict": "good",
+                "needs_human": False,
+                "followups": 1,
+                "history": [
+                    {"mass": make_mass(frame, {"pass": 0.5, frame: 0.5})},
+                    {"mass": make_mass(frame, {"pass": 0.8, frame: 0.2})},
+                ],
+            }
+
+    verifier = IteratingVerifier()
+    monkeypatch.setattr(live_demo, "stream_chat_complete", fake_chat)
+    monkeypatch.setattr(live_demo, "_terminal_fd", lambda: None)
+    monkeypatch.setattr(
+        live_demo, "build_verifier", lambda q, r, m, **kw: verifier
+    )
+    emitted = []
+
+    final, _verifier, response = live_demo.run_question(
+        "Any question?",
+        cfg=cfg,
+        ask=lambda prompt: "",
+        emit=emitted.append,
+        show_zydah=True,
+    )
+
+    assert final["verdict"] == "good"
+    assert "[muse turn 1]" in emitted
+    assert "...launching zydah" in emitted
+    assert "[zydah turn 1] the response checks out." in emitted
+    assert "turn 1 iteration 1 belief_frame:" in emitted
+    assert "turn 1 iteration 2 belief_frame:" in emitted
+    assert not any(
+        line.startswith("turn 2 belief_frame") for line in emitted
+    )
 
 
 def test_render_result_verbose_capture_logs_internal_view(caplog):
@@ -531,6 +692,8 @@ def test_render_result_verbose_capture_logs_internal_view(caplog):
                 "prompt": '{"question": "Need more info?"}',
                 "response": "Springfield, MA is cloudy today.",
                 "mass": make_mass(frame, {"pass": 0.9, frame: 0.1}),
+                "score_turn": 1,
+                "iteration": 1,
             }
         ],
         "graph_conditioning": {"support": ["Springfield, MA"]},
@@ -548,7 +711,7 @@ def test_render_result_verbose_capture_logs_internal_view(caplog):
     assert len(emitted) == 2
     assert not any("belief_frame" in line for line in emitted)
     assert "[Prompt 1]" in caplog.text
-    assert "turn 1 belief_frame:" in caplog.text
+    assert "turn 1 iteration 1 belief_frame:" in caplog.text
     assert '"pass": 0.9' in caplog.text
     assert "graph_conditioning:" in caplog.text
 
@@ -1254,6 +1417,217 @@ def test_main_passes_score_mode(monkeypatch):
     assert live_demo.main(["--question", "hi"]) == 0
     assert live_demo.main(["--score-mode", "substantive", "--question", "hi"]) == 0
     assert seen == ["every", "substantive"]
+
+
+def test_main_passes_zydah_panel_flag(monkeypatch):
+    seen = []
+
+    def fake_run_question(question, **kwargs):
+        seen.append(kwargs.get("zydah_panel", False))
+        return (
+            {"verdict": "good", "needs_human": False, "followups": 0, "history": []},
+            object(),
+            "resp",
+        )
+
+    def no_terminal(prompt):
+        raise EOFError
+
+    monkeypatch.setattr(live_demo, "run_question", fake_run_question)
+    monkeypatch.setattr(live_demo, "terminal_input", no_terminal)
+
+    assert live_demo.main(["--question", "hi"]) == 0
+    assert live_demo.main(["--zydah-panel", "--question", "hi"]) == 0
+    assert seen == [False, True]
+
+
+def test_main_rejects_save_path_without_json_suffix(capsys):
+    import pytest
+
+    with pytest.raises(SystemExit) as excinfo:
+        live_demo.main(["--save", "outputs/live_", "--question", "hi"])
+    assert excinfo.value.code == 2
+    assert "--save must name a .json file" in capsys.readouterr().err
+
+
+def test_main_passes_panel_source(monkeypatch):
+    seen = []
+
+    def fake_run_question(question, **kwargs):
+        seen.append(kwargs.get("panel_source", "yaml"))
+        return (
+            {"verdict": "good", "needs_human": False, "followups": 0, "history": []},
+            object(),
+            "resp",
+        )
+
+    def no_terminal(prompt):
+        raise EOFError
+
+    monkeypatch.setattr(live_demo, "run_question", fake_run_question)
+    monkeypatch.setattr(live_demo, "terminal_input", no_terminal)
+
+    assert live_demo.main(["--question", "hi"]) == 0
+    assert live_demo.main(["--panel-source", "base", "--question", "hi"]) == 0
+    assert seen == ["yaml", "base"]
+
+
+def test_build_verifier_base_panel_skips_yaml(monkeypatch):
+    def no_yaml():
+        raise AssertionError("base panel must not read panel.yaml")
+
+    monkeypatch.setattr(live_demo, "load_panel_config", no_yaml)
+    verifier = live_demo.build_verifier(
+        "Any question?", "An answer.", "m-test",
+        panel=True, panel_source="base",
+    )
+    assert [j.model for j in verifier.panel.judges] == [
+        "muse-wonder",
+        "muse-spark",
+        "muse-spark-open",
+    ]
+    assert verifier.panel.quorum == 2
+    assert len(verifier.panel.session_ids) == 3
+
+
+def test_panel_flag_scores_through_verify_not_verify_direct(monkeypatch):
+    from omegaconf import OmegaConf
+    from zydah.fusion import make_mass
+
+    frame = frozenset({"pass", "partial", "fail"})
+    cfg = OmegaConf.create(
+        {
+            "model": {"env_var": "LIVE_DEMO_TEST_MODEL", "id": "m-test"},
+            "human_question_markers": ["which"],
+        }
+    )
+    captured = {}
+
+    class PanelVerifier(FakeVerifier):
+        def verify(self, evidence, run=0, assumptions=None):
+            captured["evidence"] = evidence
+            return {
+                "verdict": "good",
+                "needs_human": False,
+                "followups": 0,
+                "history": [
+                    {
+                        "mass": make_mass(frame, {"pass": 0.9, frame: 0.1}),
+                        "judge_masses": [
+                            make_mass(frame, {"pass": 0.9, frame: 0.1})
+                        ],
+                        "judges": [
+                            {
+                                "name": "spark",
+                                "model": "muse-spark",
+                                "session_id": "s-1",
+                            }
+                        ],
+                        "zydah": {
+                            "decision": "commit",
+                            "bel": 0.9,
+                            "pl": 1.0,
+                            "width": 0.1,
+                            "conflict": 0.0,
+                        },
+                    }
+                ],
+                "panel_sessions": ["s-1", "s-2", "s-3"],
+            }
+
+    verifier = PanelVerifier()
+
+    def build(question, response, model_id, **kwargs):
+        captured["panel"] = kwargs.get("panel", False)
+        return verifier
+
+    monkeypatch.setattr(
+        live_demo,
+        "stream_chat_complete",
+        lambda prompt, model_id=None: iter(["Panel answer."]),
+    )
+    monkeypatch.setattr(live_demo, "_terminal_fd", lambda: None)
+    monkeypatch.setattr(live_demo, "build_verifier", build)
+    emitted = []
+
+    final, _verifier, response = live_demo.run_question(
+        "Any question?",
+        cfg=cfg,
+        ask=lambda prompt: "",
+        emit=emitted.append,
+        show_zydah=True,
+        zydah_panel=True,
+    )
+
+    assert captured["panel"] is True
+    assert "...launching zydah panel" in emitted
+    assert final["verdict"] == "good"
+    assert "[zydah turn 1] the response checks out." in emitted
+    assert "turn 1 iteration 1 belief_frame:" in emitted
+    # Terminal shows the Rich judge table + fused panel (the JSON
+    # record itself stays in the INFO log via _log_panel_json).
+    rendered = "\n".join(emitted)
+    assert "Judge panel" in rendered
+    assert "spark" in rendered
+    assert "Fused belief" in rendered
+    assert "decision: commit" in rendered
+    assert "Bel 0.900" in rendered
+
+
+def test_rich_transcript_formats_embedded_json_blocks():
+    blob = (
+        '[Prompt 1]\n{"question": "Need more info?", "assumptions": []}'
+        "\n\n[Response 1]\nPlain answer."
+    )
+
+    out = live_demo._rich_transcript_text(blob)
+
+    assert "[Prompt 1]" in out
+    assert "[Response 1]" in out
+    assert "Plain answer." in out
+    assert '"question": "Need more info?"' in out
+
+
+def test_panel_json_record_pairs_each_judge_with_session_and_score():
+    from zydah.fusion import make_mass
+
+    frame = frozenset({"pass", "partial", "fail"})
+
+    class J:
+        def __init__(self, name, model):
+            self.name = name
+            self.model = model
+
+    class P:
+        judges = [J("wonder", "muse-wonder"), J("spark", "muse-spark")]
+        session_ids = ["sess-1", "sess-2"]
+
+    entry = {
+        "judge_masses": [
+            make_mass(frame, {"pass": 0.8, frame: 0.2}),
+            make_mass(frame, {"fail": 0.7, frame: 0.3}),
+        ],
+        "judges": [
+            {"name": "wonder", "model": "muse-wonder", "session_id": "sess-1"},
+            {"name": "spark", "model": "muse-spark", "session_id": "sess-2"},
+        ],
+        "zydah": {
+            "bel": 0.5,
+            "pl": 0.9,
+            "width": 0.4,
+            "conflict": 0.1,
+            "decision": "escalate",
+        },
+    }
+
+    record = live_demo._panel_json_record(entry)
+
+    assert record["fused"]["decision"] == "escalate"
+    assert record["judges"][0]["name"] == "wonder"
+    assert record["judges"][0]["model"] == "muse-wonder"
+    assert record["judges"][0]["session_id"] == "sess-1"
+    assert record["judges"][0]["mass"]["pass"] == 0.8
+    assert record["judges"][1]["pignistic"]["fail"] > 0.5
 
 
 def test_artifact_turns_carry_interval_decision_fields():
