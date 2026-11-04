@@ -15,6 +15,7 @@ Open-world evidence gathering (web fetch) is a later extension point.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -43,6 +44,8 @@ from zydah.evidence import (
     classify_independence,
 )
 from zydah.fusion import Mass, belief_frame
+
+logger = logging.getLogger("zydah.verifier")
 from zydah.interface import FUSED_TAG, direct_verdict, fuse_response, fused_verdict
 from zydah.judges import extract_json_object, parse_mass_json
 from zydah.transport import chat_complete
@@ -1064,6 +1067,7 @@ class ZydahVerifier:
             view_text = (
                 ledger.original_only() if followups == 0 else ledger.assisted(separator=prefix)
             )
+            logger.info("verify_direct turn=%d evidence:\n%s", followups + 1, view_text)
             mass = self.mass_elicitor(view_text, self.frame, self.model_id)
             zydah_verdict = fused_verdict(
                 [mass],
@@ -1092,6 +1096,7 @@ class ZydahVerifier:
                 }
             followup = self.followup_payload(validation, assumptions)
             prompt = serialize_followup(followup)  # transmitted to the LLM
+            logger.info("verify_direct followup prompt:\n%s", prompt)
             history[-1]["prompt"] = prompt
             history[-1]["followup"] = followup
             if self.responder is None or followups >= max_iterations:

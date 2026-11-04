@@ -45,4 +45,4 @@ direct_mass_prompt_template: |
 model:
   id: muse-spark
   env_var: ZYDAH_VERIFIER_MODEL
-  cost_tier: low
+  # Effort is a wire parameter: see reasoning_effort in transport.yaml.

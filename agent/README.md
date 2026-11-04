@@ -72,3 +72,49 @@ Majority vote, score averaging, and multi-judge "juries" (Verga et al., 2024).
 uv sync --extra dev
 uv run pytest
 ```
+
+## Live demo (interactive)
+
+The demo talks to the configured live model (`.env` at the repo root),
+shows the first response under `[muse]`, verifies it under `[zydah]`,
+and pauses at the terminal whenever a human choice is needed:
+
+```sh
+uv run python tools/live_demo.py
+uv run python tools/live_demo.py --question "What is the weather in Springfield today?"
+uv run python tools/live_demo.py --save outputs/live_demo/latest.json
+uv run python tools/live_demo.py --zydah --save outputs/live_demo/latest.json
+uv run python tools/live_demo.py --verbose
+uv run python tools/live_demo.py --log-file trace.log
+```
+
+At the prompts:
+
+- `[you]` — the input buffer. Type and press Enter to send; Enter on
+  an empty buffer sends nothing and redraws the prompt. After a
+  verdict you are back at this buffer for the next question.
+- `[you: choice key]` — type a choice key (e.g. `B` for North); `Other`
+  then asks for free text (e.g. `the celtics are a great team`).
+- `[you: answer]` — answer the model's own clarifying question.
+- Typed text at the buffer right after a `[muse]` response is sent
+  as a human direction before Zydah evaluates; `q` or Ctrl-C quits
+  gracefully (`[zydah] bye`). Enter alone never quits.
+
+`--log-file trace.log` captures `logging` INFO to a file via a
+`FileHandler` — no stderr redirect, nothing logged to the screen:
+every input line, model prompt/response, `asks_human` decision,
+gate direction, and the exact evidence Zydah scores, so swallowed
+or misrouted text can be traced end to end. `--verbose` alone logs
+the same records to stderr; both flags together write to both.
+Uncaught exceptions are logged with their traceback and echoed to
+the terminal as one line: `[zydah] fatal: ... (see log)`.
+
+`--zydah` shows Zydah's internal view: `[zydah] ...Thinking`
+semaphores while scoring, the follow-up transcript, the belief
+frame as it adjusts per turn, and any graph conditioning. Without
+it, only the concluded `[zydah]` sentence and verdict line print.
+
+`--save` mirrors the terminal into the JSON artifact tee-style: the
+response appears in the terminal and in the file as it happens
+(`transcript` streams live; the structured artifact — question,
+response, verdict, turns, belief frames — lands on finish).
