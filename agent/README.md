@@ -1,8 +1,12 @@
 # Zydah — evidential belief fusion for agent evaluation
 
-Replace single LLM-as-judge / majority vote with a panel of judges fused via
-Dempster-Shafer theory, Yager's rule, and Smets' transferable belief model (TBM).
-Conflict between judges is preserved as a signal, not normalized away.
+Replace single LLM-as-judge / majority vote with a panel of judges whose
+masses are fused by deterministic belief-fusion rules. The core library
+implements Dempster's rule, Shafer reliability discounting, Yager's rule,
+and Smets' transferable belief model (TBM); the live verifier pipeline
+defaults to Yager's rule. Dempster is a comparison baseline and TBM is an
+optional rule, not the default pipeline path. Conflict between judges is
+preserved as a signal, not normalized away.
 
 > **Provenance:** new work built during the event, Oct 27 – Nov 4, 2026.
 > Public repo; synthetic or public data only. No medical-advice use cases.
@@ -12,8 +16,9 @@ Conflict between judges is preserved as a signal, not normalized away.
 
 - **Decision invariance under judge variability:** same evidence → same decision,
   even when individual judges vary run to run.
-- **Escalate on evidence** (high conflict mass / wide [Bel, Pl] interval),
-  not on a retry counter.
+- **Escalate on evidence:** the verifier loop flags a wide [Bel, Pl]
+  interval or high conflict mass K for follow-up; the router separately
+  commits, rejects, or escalates on whether [Bel, Pl] straddles τ.
 - **Decide on belief intervals** with per-domain thresholds
   (τ = 0.80 general, 0.95 high-stakes):
   commit if Bel ≥ τ, reject if Pl < τ, escalate if the interval straddles τ.
@@ -36,9 +41,18 @@ Conflict between judges is preserved as a signal, not normalized away.
 ## Math (published sources only)
 
 - Dempster's rule (Dempster 1967; Shafer 1976) — normalized conjunctive combination.
+- Shafer reliability discounting (Shafer 1976) — scale a source's committed mass by alpha before combination; move the remainder to Ω.
 - Yager's rule (Yager 1987) — conflict mass K reassigned to Ω (ignorance).
 - Smets' TBM (Smets & Kennes 1994) — unnormalized conjunctive combination;
-  decision via the pignistic transform.
+  decision via the pignistic transform. Implemented as an optional rule.
+  Frame failure is detectable today: under `rule: tbm`, conflict landing
+  on the empty set is the alarm, and the local response is to suspend
+  the decision and escalate. Repairing the frame — supplying the correct
+  unlisted hypothesis — generally needs new evidence. The demo is
+  closed-world only and does not gather that evidence; it relies on the
+  model's trained state and the evidence supplied in the prompt. The
+  `world: closed` verifier gate and the evidence-access gap are separate
+  blockers (ZYDAH-009).
 - Simultaneous n-ary combination (order-invariant by construction).
 
 No proprietary stabilization parameters. Defaults are simple and documented
@@ -46,7 +60,9 @@ in [`src/zydah/fusion.py`](src/zydah/fusion.py).
 
 ## Judges (Meta models)
 
-Heterogeneous panel via structured JSON masses incl. m(Ω):
+Three independently sessioned draws via structured JSON masses incl.
+m(Ω). Seats may be occupied by different models, or by the same model
+under independent contexts:
 
 - Muse Wonder (Meta Model API)
 - Muse Spark (Meta Model API)
@@ -59,8 +75,45 @@ The judges list is required — misconfiguration fails validation, with
 no hardcoded fallback. A judge entry without a model defaults to
 Spark; effort defaults to low. Panel v1 quorum is 2 of 3: one judge
 failure is recorded and tolerated, below quorum the cycle raises.
-Each judge runs under its own session id (provenance labels on the
-stateless transport).
+Each judge is elicited in a separate stateless call and receives the
+evidence without another judge's mass or prose. That call structure
+creates the silo; the session id names and audits it. Judge masses
+are Shafer-discounted by the configured alpha before Yager fusion,
+with raw masses retained for audit.
+
+A seat is the experimental slot and its occupant model is the
+treatment. Each occupant induces an epistemic distribution over mass
+assignments for the same evidence: repeated independent calls sample
+from that distribution, and changing the occupant changes the
+distribution being sampled. The same model in all three seats gives
+iid draws from one model's distribution, so K measures intra-model
+disagreement rather than cross-model corroboration. Different models
+in the seats are contextually independent but not identically
+distributed.
+
+**Model collapse vs mode collapse**
+
+- **Model collapse** is about which models/distributions are present.
+  Several named judges secretly routing to one deployment, or models
+  trained recursively on synthetic output losing distinct behavior and
+  tail knowledge, leave the system with less model diversity than it
+  claims.
+- **Mode collapse** is about how concentrated one model's output
+  distribution is. Repeated samples land on the same answer, phrasing,
+  or mass assignment, even if the model itself is intact. Low output
+  diversity is the symptom.
+- Same model in three seats is a model-diversity limitation, not
+  automatically mode collapse. Isolation via separate stateless
+  sessions keeps those seats contextually independent; if stochastic
+  decoding gives three meaningfully different masses, mode collapse
+  has not occurred for that evidence.
+- Three different models can still mode-collapse onto the same generic
+  judgment; model heterogeneity alone does not prove sample diversity.
+- Temperature-zero or near-deterministic decoding can turn three seats
+  into one repeated sample: that is mode collapse at inference time.
+- Provenance and model identity show whether model collapse is a
+  risk. The realized masses and conflict K show whether mode collapse
+  actually happened on that cycle.
 
 Keys come from environment variables. Never commit secrets. Unit
 tests inject a seeded mock panel explicitly — no API calls, and no
@@ -75,7 +128,7 @@ implicit mock mode in production paths.
 - `src/zydah/interface.py` — [muse] direct / [zydah] fused pipe-through API
 - `src/zydah/verifier.py` — System 2 verifier loop (Hydra/OmegaConf YAML config)
 - `src/zydah/evidence.py` — provenance ledger + anti-eavesdropping session rule
-- `eval/harness.py` — majority vote vs. averaging vs. Dempster vs. Zydah
+- `eval/harness.py` — majority vote vs. averaging vs. Dempster vs. Zydah vs. discounted Zydah
 - `tests/` — Zadeh's paradox, order invariance, sum-to-1 (no API calls)
 
 ## Baselines to beat
@@ -122,6 +175,20 @@ fused Bel/Pl/width/conflict; the same data is logged as a compact
 `panel_json` record (per judge: model, session id, mass, pignistic)
 for downstream viewers such as Streamlit.
 
+**Model resolution**
+
+- `MODEL_API_MODEL`, when set, is the parent endpoint model: the
+  transport sends it on the wire for every chat/streaming call, ahead
+  of any caller-supplied model.
+- When `MODEL_API_MODEL` is unset, caller models apply: the main and
+  verifier model comes from `verifier.yaml` (`model.id`, or
+  `ZYDAH_VERIFIER_MODEL` when set), and judge seat models come from
+  `panel.yaml`, `--panel-source`, or `--panel-model`.
+- Judge names and session ids can therefore differ from the resolved
+  wire model. Check `chat_complete model=...` or
+  `stream_chat_complete model=...` in `trace.log` for the model that
+  was actually sent.
+
 At the prompts:
 
 - `[you]` — the input buffer. Type and press Enter to send; Enter on
@@ -139,7 +206,8 @@ At the prompts:
 every input line, model prompt/response, `asks_human` decision,
 gate direction, and the exact evidence Zydah scores, so swallowed
 or misrouted text can be traced end to end. `--verbose` alone logs
-the same records to stderr; both flags together write to both.
+the same records to stderr; with `--log-file`, INFO records go to the
+file only so the terminal/Rich view stays clean.
 Uncaught exceptions are logged with their traceback and echoed to
 the terminal as one line: `[zydah] fatal: ... (see log)`.
 

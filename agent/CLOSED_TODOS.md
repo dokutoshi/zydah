@@ -3,17 +3,80 @@
 Finished work, newest first. `Jira:` fills in once the Cloud sync in
 `OPEN_TODOS.md` (ZYDAH-002) is wired; `-` means not yet synced.
 
+## ZYDAH-004 — Decide whether router consumes K / interval width directly
+
+- Status: done
+- Area: router
+- Source: README thesis vs `src/zydah/router.py`
+- Jira: ZYDAH-3
+- Closed: 2026-11-05
+- Details: decision recorded — the tau-straddle is sufficient for the
+  router. `decide_interval` commits, rejects, or escalates on whether
+  [Bel, Pl] straddles tau; conflict K and interval width belong to the
+  verifier loop's validator gate, which flags speculative cycles for
+  follow-up before routing. Both READMEs now state that split instead
+  of implying the router consumes K directly.
+- Tests: documentation alignment only; router behavior unchanged.
+
+## ZYDAH-003 — Decide per-judge discount source and wire alpha
+
+- Status: done
+- Area: fusion / judges
+- Source: derivation doc §11 follow-up
+- Jira: ZYDAH-2
+- Closed: 2026-11-05
+- Details: chose fixed configured reliability for v1 (not judge-reported;
+  calibration deferred until judge-level labeled outcomes exist).
+  `panel.yaml` carries panel-global `alpha: 1.0`, with optional
+  per-judge `alpha` overrides validated by `PanelConfig`. `LivePanel`
+  applies `discount_mass` at the judge call site before Yager fusion;
+  raw masses and alphas are retained in outcomes, verifier history,
+  and `panel_json`. The shipped default stays 1.0 (behavior-preserving)
+  until the discounted harness arm justifies a lower value.
+- Tests: `tests/suite/test_panel.py` (config validation, per-judge
+  override, discounted elicitation, failed-middle-judge alpha/raw
+  alignment).
+
+## ZYDAH-008 — Add discounted-Zydah arm to harness comparison
+
+- Status: done
+- Area: eval
+- Source: derivation doc §11 "robust system does both"
+- Jira: ZYDAH-6
+- Closed: 2026-11-05
+- Details: `eval/harness.compare()` now includes `zydah_discounted`,
+  applying Shafer discounting (one alpha or per-judge alphas) before
+  the Zydah verdict. The run manifest records `discount_alpha` and the
+  full method list; metrics cover committed accuracy, coverage, and
+  flip rate on the same seeded items as the other arms.
+- Tests: `tests/suite/test_harness.py` (method/manifest coverage and
+  a discounted-arm escalation case at alpha 0.5).
+
+## ZYDAH-007 — Document discounting in README math section
+
+- Status: done
+- Area: docs
+- Source: `discount_mass` added; README listed only Dempster / Yager / TBM
+- Jira: ZYDAH-5
+- Closed: 2026-11-05
+- Details: README Math now names Shafer reliability discounting
+  alongside Dempster, Yager, and Smets/TBM, and the Judges section
+  documents configured alpha, separate stateless elicitation silos,
+  and the seat/occupant epistemic-distribution research framing.
+
 ## ZYDAH-014 — Bellman: evidence gate for learned routing
 
 - Status: done (gate decision: DO NOT WIRE)
+- Jira: ZYDAH-33
 - Area: verifier / RL
 - Source: Bellman plan Steps 2-6, 2026-11-05
 - Closed: 2026-11-05
 - Details: Steps 2-5 shipped: `conf/bellman.yaml`, `trajectory.py`
   (per-step `(s, a)` rows, policy `pi_0`, both verifier loops),
-  `td.py` (TD(0)/MC, SAB Blackjack `update_td` verbatim, Q save/load +
-  greedy), `eval/bellman_eval.py` (pi_0 vs TD vs MC, reference-label
-  rewards). Gate evidence reviewed 2026-11-05:
+  `td.py` (temporal-difference TD(0)/MC, SAB Blackjack `update_td`
+  verbatim, Q save/load + greedy), `eval/bellman_eval.py` (synthetic
+  smoke harness with reference-label rewards). Gate evidence reviewed
+  2026-11-05:
   `outputs/suite/bellman_eval/report.json` (synthetic, 20 train /
   20 test): pi_0 committed accuracy 0.55 at coverage 1.00; TD and MC
   1.00 at coverage 0.55, escalate rate 0.45, mean cost 0.45.
@@ -24,6 +87,18 @@ Finished work, newest first. `Jira:` fills in once the Cloud sync in
   future ticket: TD must beat pi_0 on held-out labeled/live
   trajectories, not synthetic ones. Live routing keeps the
   width/conflict gate; no TD flag added.
+- Limitations recorded 2026-11-05: (1) synthetic labels are a
+  deterministic function of the width bucket, so the comparison
+  demonstrates arithmetic, not learnability; (2) synthetic episodes
+  are single-step, so TD(0) and every-visit MC reduce to the same
+  terminal update and gamma/bootstrapping are unexercised there;
+  (3) synthetic items carry a single mass, so K = 0 in every episode
+  and the conflict state feature is structurally dead; (4) an unseen
+  Q state previously fell back to first-action `commit` by tie-break,
+  so the greedy fallback is now `ask-human` when no positive Q
+  evidence exists. The needed dataset is live panel trajectories
+  with three judge masses, varying K, episodes of two or more steps,
+  and held-out labels.
 - Tests: `tests/suite/test_bellman.py`,
   `tests/suite/test_bellman_eval.py` (8 tests); full suite 226
   passed, 3 skipped, 2026-11-05.

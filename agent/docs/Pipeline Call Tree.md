@@ -121,92 +121,107 @@ are why the demo runs the non-panel path by default. The panel contract
 - Quorum is 2 of 3 (majority): a cycle fuses when at least 2 judges
   return a mass; one judge failure is recorded, not fatal. Below
   quorum the cycle raises.
-- Session ids v1: one session label per judge, expanding the demo's
+- Session ids v1: one session id per judge, expanding the demo's
   existing separate-session pattern (muse / verifier / judge x3).
-  The transport is stateless, so ids are provenance labels.
+  Each judge is elicited in a separate stateless call and receives
+  the evidence without another judge's mass or prose. That call
+  structure creates the silo; the session id names and audits it.
 - Each judge sends its own configured model (the env-collapse that
   silently merged all judges into one model is fixed).
+- Shafer discounting: each raw judge mass is discounted by its
+  configured alpha before Yager fusion. Raw masses and alphas are
+  retained in panel outcomes and `panel_json` for audit.
+  - `alpha=1.0` returns judge masses unchanged.
+  - `alpha=0.5` returns exactly `discount_mass(raw, frame, 0.5)` per judge.
+  - Per-judge alpha overrides the panel-global alpha.
+  - Lowering alpha reduces committed-source conflict roughly
+    quadratically (pairwise conflict terms scale with `alpha^2`),
+    while fused width climbs because discounted mass — plus any
+    remaining Yager conflict — accumulates in `Omega`.
 - v1 limits: no `resume_panel` (a needs-human pause stays paused on
   the panel path), no sealed-first-response independence bookkeeping.
+
+**Seats as a research design**
+
+- A seat is the controlled slot; the occupant model is the treatment.
+- Each occupant induces an epistemic distribution over mass
+  assignments for the same evidence. Repeated independent calls
+  sample from that distribution; changing the occupant changes the
+  distribution being sampled.
+- The same model in all seats estimates intra-model variance, mode
+  stability, `Omega` placement, and K under repeated independent
+  draws. Those draws are iid only when model and conditions match.
+- Different models in the seats compare epistemic distributions
+  under matched evidence, prompt, frame, and scoring rules. Those
+  draws are contextually independent but not identically distributed.
+- One-seat substitutions are ablations. YAML seat configuration,
+  `--panel-source`, and `--panel-model` are the operational controls.
 
 **Panel v2 (planned)**
 
 - Quorum replaced by the expert rule: `max(Pl)` vs `Omega` — when one
   judge is confident and the others are ignorant, the majority do not
   override the expert.
-- Bellman: v1 trajectory logging + v2 offline TD fit shipped
-  (see the Bellman section below); routing not wired.
+- Bellman / temporal-difference routing is **Further RL Research**
+  (see below); it is not part of current routing.
 
-## Bellman / TD routing (offline learner implemented; routing not wired)
+## Further RL Research
 
-Strategic hint, not a spec: the interesting question here is not
-whether a threshold can route escalation — it can — but whether
-*routing under evidential uncertainty is a learnable sequential
-decision problem*, and what a learned policy discovers that a
-hand-set threshold cannot express. Cost-aware action selection,
-conflict as state, process-level reward: this is the seam where
-belief fusion meets sequential decision-making, and it is testable
-with the machinery below. Implemented offline 2026-11-05:
-`src/zydah/trajectory.py` + `conf/bellman.yaml` (per-step rows),
-`src/zydah/td.py` (TD/MC + Q persistence), `eval/bellman_eval.py`
-(pi_0 vs TD vs MC). Live routing still uses the hand-written gate;
-Step-6 gate decided 2026-11-05 (ZYDAH-014, closed): DO NOT WIRE — evidence is synthetic-only and no live trajectory rows exist yet.
+### Temporal difference (TD) routing — offline learner, not wired
 
-The verifier loop is a sequential decision process, so routing can be
-learned instead of only thresholded. The learner is a port of an
-existing tabular Q-learning
-script (SAB Blackjack TD/MC), which transfers unchanged as an algorithm —
-`target = r + gamma * max Q(s', a')`, TD error, epsilon-greedy — while
-its state, action, reward, and episode definitions are rebuilt for
-this domain (domain adaptation: the Q-table itself does not transfer).
+The research question is whether routing under evidential uncertainty
+is a learnable sequential-decision problem: cost-aware action
+selection, conflict as state, and process-level reward. That is future
+research, not a current routing claim.
 
-- **State s** — discretized `(width bucket, conflict bucket,
-  follow-ups left, graph unresolved?)`; bucket edges are
-  hyperparameters in YAML, never literals in code. Three judge masses
-  make conflict K a state feature and give a sampled distribution
-  over next states for the expectation in the backup.
-- **Actions** — `commit`, `model follow-up`, `ask human`,
-  `re-elicit panel`. The panel becomes one costed action (3 judge
-  calls) competing with the single-elicitor follow-up (1 call), so
-  TD learns when the panel is worth its cost rather than the routing
-  being hardwired.
-- **Reward r** — terminal +1/-1 for a correct/wrong commit on labeled
-  data, minus lambda * (tokens + seconds) per step from the transport
-  usage records. No width-reduction shaping in v1: an elicitor can
-  narrow an interval without being right, so shaping is gameable.
-- **Episode** — one question through the verifier loop; terminated on
-  verdict or when `max_iterations` is exhausted.
-- **TD error as a routing signal** — `delta = r + gamma * V(s') -
-  V(s)` sits beside conflict K: K measures judge disagreement, delta
-  measures surprise against expected outcome. Both are signals, not
-  noise to normalize away.
+**What exists**
 
-Scope: **v1 is trajectory logging only; v2 adds the offline TD fit.**
+- Trajectory logging: per-step rows from both verifier loops into
+  `cycles.jsonl` under the current threshold policy (pi_0).
+- A ported tabular temporal-difference TD(0) / Monte-Carlo learner in
+  `src/zydah/td.py`: the `update_td` arithmetic is ported from SAB
+  Blackjack, with Q persistence and greedy evaluation. The Bellman
+  names are retained for the learner's config (`conf/bellman.yaml`)
+  and synthetic smoke harness (`eval/bellman_eval.py`), so searching
+  “Bellman” lands on the TD learner.
+- Unit tests for the update arithmetic, bucketing, Q save/load, and
+  trajectory emission.
 
-Build order:
+**What the synthetic comparison does not show**
 
-1. (v1) Log `(s, a, r, s')` trajectories into `cycles.jsonl` under the
-   current threshold policy (pi_0); the panel is a logged action even
-   before it can be chosen. Trajectories record `model_id` — a model
-   swap is a new domain and stale Q must not silently apply.
-2. (v2) Port the TD/MC learner offline over those logs; hyperparameters
-   (lr, gamma, epsilon schedule, bucket edges, lambda) in YAML.
-3. Harness comparison: threshold pi_0 vs TD vs MC on escalate rate,
-   cost per resolved question, and accuracy.
-4. Only if TD wins: the learned Q gates `validate()` beside the
-   width/conflict gate.
+- `eval/bellman_eval.py` is a synthetic separable smoke check, not
+  policy evidence. Its labels are built as a deterministic function of
+  the width bucket, so separation is true by construction.
+- Its episodes are single-step. On one-step episodes TD(0) and
+  every-visit MC reduce to the same terminal update; gamma and
+  bootstrapping are not exercised there.
+- Its items carry a single mass, so there are no contradictory judge
+  pairs and `K = 0` throughout. The conflict state feature is dead in
+  that dataset, and the visited state collapses to width bucket only.
+- Therefore no pi_0-vs-TD-vs-MC performance claim is made. The numbers
+  demonstrate arithmetic on a separable fixture, not learnability.
 
-Exploration (epsilon-greedy) is confined to the harness and offline
-logs — never the live demo, where a random action could commit a bad
-verdict or interrogate the human at random. Sampling note: model
-collapse is not mode collapse. The same model under three independent
-session ids yields three iid draws from that model's distribution
-(independent contexts, stochastic decoding), so K honestly measures
-intra-model disagreement and the panel meets the iid criterion for
-sampling. What it does not provide is cross-model corroboration:
-three draws still describe one model's distribution. Only a
-deterministic (temperature-zero) endpoint degenerates the three
-draws into one repeated sample.
+**Gate and next dataset**
+
+- ZYDAH-014 (closed) decided: **DO NOT WIRE**. Live routing keeps the
+  hand-written width/conflict gate; no TD flag exists.
+- The concrete blocker is data: a real comparison needs live panel
+  trajectories with three judge masses, varying K, episodes of two or
+  more steps, and held-out labels. Building that dataset is days of
+  work and needs live panel logs that do not yet exist.
+- A wiring hazard is already recorded: an unseen Q state must fall
+  back to `ask-human`, never to `commit` by action-order tie-break.
+
+**Sampling note**
+
+- Model collapse is not mode collapse. The same model under three
+  independent session ids yields three iid draws from that model's
+  epistemic distribution over mass assignments (separate stateless
+  contexts, stochastic decoding), so K honestly measures intra-model
+  disagreement. It does not provide cross-model corroboration: three
+  draws still describe one model's distribution. Only a deterministic
+  (temperature-zero) endpoint degenerates the three draws into one
+  repeated sample.
 
 ## How Zydah steers the context (verified against the code)
 
@@ -268,7 +283,7 @@ Its **text** is; its structure is not.
   of message, both JSON: the validator's follow-up
   (`serialize_followup`) and, after a human choice, the
   `HumanFollowup` (choice + expanded graph context).
-- Chunk kinds, session ids, and provenance labels stay inside the
+- Chunk kinds, session ids, and provenance metadata stay inside the
   ledger. They drive independence classification (`CONTEXT_INDEPENDENT`
   / `ASSISTED` / `JOINT_CONTEXT`) and are never shown to the model —
   that separation is the anti-eavesdropping boundary.
