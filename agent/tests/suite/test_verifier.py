@@ -74,6 +74,13 @@ def test_no_responder_returns_prompt_and_question():
     assert "status" not in out["followup"]
 
 
+def test_verify_without_panel_fails_closed_instead_of_using_mock():
+    verifier = ZydahVerifier(FRAME)
+
+    with pytest.raises(RuntimeError, match="explicit panel"):
+        verifier.verify("Is it cloudy today in Ohio?")
+
+
 def test_iteration_with_responder_reduces_uncertainty_to_good():
     seen = {}
 

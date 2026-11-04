@@ -787,3 +787,38 @@ def test_human_text_without_resolver_conditions_nothing():
         verifier.condition_on_human_text("it is the Massachusetts one")
         is None
     )
+
+
+def test_verify_direct_aggregates_transport_usage(monkeypatch):
+    from zydah.transport import chat_complete, load_transport_config
+
+    cfg = load_transport_config()
+    monkeypatch.setenv(cfg.base_url_env, "https://api.example.test/v1")
+    monkeypatch.setenv(cfg.api_key_env, "test-key")
+    monkeypatch.setenv(cfg.model_env, "test-model")
+
+    def opener(url, data, headers, timeout):
+        return {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7},
+        }
+
+    def elicitor(evidence, frame, model_id):
+        chat_complete("score this", opener=opener)
+        return narrow_mass()
+
+    verifier = ZydahVerifier(FRAME, mass_elicitor=elicitor)
+    out = verifier.verify_direct("claim")
+    assert out["usage"]["calls"] == 1
+    assert out["usage"]["tokens_in"] == 11
+    assert out["usage"]["tokens_out"] == 7
+    assert out["usage"]["elapsed_s"] >= 0
+
+
+def test_verify_direct_without_transport_calls_reports_zero_usage():
+    verifier = ZydahVerifier(
+        FRAME, mass_elicitor=SequenceElicitor([narrow_mass()])
+    )
+    out = verifier.verify_direct("claim")
+    assert out["usage"]["calls"] == 0
+    assert out["usage"]["tokens_in"] in (None, 0)
