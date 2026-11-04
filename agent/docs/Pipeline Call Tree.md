@@ -251,6 +251,47 @@ unresolved generates the `[human]` multiple-choice question
 above, resolved appends a `GRAPH_RESOLUTION` evidence chunk and
 the agent continues without the human.
 
+## Negation: Zydah before MiniLM (veto semantics)
+
+Correct — with one precise condition on what "before" means.
+
+MiniLM is a bi-encoder: "Celtics are in Boston" and "Celtics are
+**not** in Boston" embed almost identically. No amount of belief
+JSON prepended to its input text fixes that — the encoder has no
+polarity to reason with, and JSON tokens just pollute the
+similarity.
+
+What solves it is veto semantics, which is what your ordering
+gives if implemented this way:
+
+```
+human free text
+  -> Zydah System 1: belief JSON context (live candidates, partitions, (A, ~A, Ω))
+  -> polarity parse per candidate clause (verifier.yaml +/- markers)
+       negative marker in the candidate's clause  =>  NO support. Final.
+  -> MiniLM cross-check ONLY inside the affirmed set (topicality, threshold)
+  -> Yager condition candidate_beliefs (human alpha)
+```
+
+- Negation is decided by symbolic code that can actually see the
+  word "not" / "no relationship" in the right clause.
+- MiniLM never gets a vote on polarity. It can only confirm an
+  already-affirmed mention is topical, or withhold support below
+  threshold.
+- The belief JSON context is what makes the parse per-candidate
+  instead of global: System 1 knows which candidates are live and
+  what mass they carry before any similarity is computed.
+
+That's also the safe failure mode: unrecognized negation
+(sarcasm, "wrong coast") matches no affirmative — conditioning
+simply doesn't fire and beliefs stay uniform, rather than
+conditioning on the wrong candidate.
+
+So: yes, Zydah-first solves the challenge iff MiniLM is
+downstream of the polarity gate with no override. If MiniLM's
+score can resurrect a negated candidate, the bug is still there
+regardless of order.
+
 ## Invariants
 
 - `[muse]` is always the sealed first response; `[zydah]` is always
