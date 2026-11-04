@@ -32,6 +32,76 @@ def load_transport_config() -> DictConfig:
     return OmegaConf.load(_CONFIG_PATH)
 
 
+_LAST_STATS: Dict[str, object] = {}
+_CUMULATIVE: Dict[str, object] = {
+    "calls": 0,
+    "elapsed_s": 0.0,
+    "tokens_in": None,
+    "tokens_out": None,
+}
+
+
+def cumulative_stats() -> Dict[str, object]:
+    """Running totals over all completed calls in this process (copy).
+
+    Aggregators diff two snapshots to price a span that may contain
+    several calls (e.g. a 3-judge panel elicitation).
+    """
+    return dict(_CUMULATIVE)
+
+
+def last_call_stats() -> Dict[str, object]:
+    """Stats for the most recent completed model call (copy).
+
+    Keys: ``seq`` (monotonic call counter), ``model``, ``stream``,
+    ``elapsed_s``, ``tokens_in``, ``tokens_out`` (None when the
+    endpoint did not report usage). Empty before any call completes.
+    Callers that aggregate (e.g. the verifier) diff ``seq`` around a
+    call instead of trusting wall-clock bookkeeping of their own.
+    """
+    return dict(_LAST_STATS)
+
+
+def _record_stats(
+    model: str,
+    started: float,
+    usage: Optional[Mapping],
+    *,
+    stream: bool,
+) -> None:
+    tokens_in = tokens_out = None
+    if isinstance(usage, Mapping):
+        if isinstance(usage.get("prompt_tokens"), int):
+            tokens_in = usage["prompt_tokens"]
+        if isinstance(usage.get("completion_tokens"), int):
+            tokens_out = usage["completion_tokens"]
+    elapsed = time.perf_counter() - started
+    _LAST_STATS.update(
+        {
+            "seq": int(_LAST_STATS.get("seq", 0)) + 1,
+            "model": model,
+            "stream": stream,
+            "elapsed_s": elapsed,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+        }
+    )
+    _CUMULATIVE["calls"] = int(_CUMULATIVE["calls"]) + 1  # type: ignore[arg-type]
+    _CUMULATIVE["elapsed_s"] = float(_CUMULATIVE["elapsed_s"]) + elapsed  # type: ignore[arg-type]
+    for key, value in (("tokens_in", tokens_in), ("tokens_out", tokens_out)):
+        if isinstance(value, int):
+            current = _CUMULATIVE[key]
+            _CUMULATIVE[key] = (current if isinstance(current, int) else 0) + value
+    logger.info(
+        "llm call model=%s stream=%s elapsed_s=%.3f tokens_in=%s tokens_out=%s",
+        model,
+        stream,
+        elapsed,
+        tokens_in,
+        tokens_out,
+    )
+
+
 def _default_opener(url: str, data: bytes, headers: Dict[str, str], timeout: float) -> Mapping:
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -52,6 +122,7 @@ def chat_complete(
     *,
     config: Optional[DictConfig] = None,
     opener: Optional[Opener] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """Send one user prompt; return the assistant's text content.
 
@@ -67,7 +138,7 @@ def chat_complete(
     model = env_model or model_id or _env_or_raise(cfg, "model_env")
     url = base_url.rstrip("/") + str(OmegaConf.select(cfg, "chat_path"))
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}]}
-    effort = OmegaConf.select(cfg, "reasoning_effort")
+    effort = reasoning_effort or OmegaConf.select(cfg, "reasoning_effort")
     if effort:
         payload["reasoning_effort"] = str(effort)
     headers = {
@@ -80,6 +151,7 @@ def chat_complete(
     backoff = float(OmegaConf.select(cfg, "retry_backoff_seconds"))
     data = json.dumps(payload).encode("utf-8")
     logger.info("chat_complete model=%s prompt:\n%s", model, prompt)
+    started = time.perf_counter()
     attempt = 0
     while True:
         try:
@@ -98,6 +170,8 @@ def chat_complete(
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError(f"unexpected model API response shape: {sorted(response)!r}") from exc
     text = content if isinstance(content, str) else str(content)
+    usage = response.get("usage") if isinstance(response, Mapping) else None
+    _record_stats(model, started, usage, stream=False)
     logger.info("chat_complete response:\n%s", text)
     return text
 
@@ -133,6 +207,8 @@ def stream_chat_complete(
         "messages": [{"role": "user", "content": prompt}],
         "stream": True,
     }
+    if OmegaConf.select(cfg, "stream_usage"):
+        payload["stream_options"] = {"include_usage": True}
     effort = OmegaConf.select(cfg, "reasoning_effort")
     if effort:
         payload["reasoning_effort"] = str(effort)
@@ -146,6 +222,7 @@ def stream_chat_complete(
     timeout = float(OmegaConf.select(cfg, "timeout_seconds"))
     data = json.dumps(payload).encode("utf-8")
     logger.info("stream_chat_complete model=%s prompt:\n%s", model, prompt)
+    started = time.perf_counter()
     try:
         response = open_fn(url, data, headers, timeout)
     except urllib.error.HTTPError as exc:
@@ -153,11 +230,18 @@ def stream_chat_complete(
     except (urllib.error.URLError, TimeoutError) as exc:
         reason = getattr(exc, "reason", exc)
         raise RuntimeError(f"model API unreachable: {reason}") from exc
+    usage_out: Dict[str, object] = {}
     try:
         chunks: List[str] = []
-        for delta in _sse_content(response):
+        for delta in _sse_content(response, usage_out):
             chunks.append(delta)
             yield delta
+        _record_stats(
+            model,
+            started,
+            usage_out.get("usage"),  # type: ignore[arg-type]
+            stream=True,
+        )
         logger.info("stream_chat_complete response (%d chunks):\n%s", len(chunks), "".join(chunks))
     except (urllib.error.URLError, TimeoutError) as exc:
         reason = getattr(exc, "reason", exc)
@@ -189,8 +273,13 @@ def _raw_lines(response) -> Iterator[bytes]:
         yield buffer
 
 
-def _sse_content(response) -> Iterator[str]:
-    """Parse SSE deltas; tolerate a plain JSON (non-streamed) reply."""
+def _sse_content(response, usage_out: Optional[Dict] = None) -> Iterator[str]:
+    """Parse SSE deltas; tolerate a plain JSON (non-streamed) reply.
+
+    When ``usage_out`` is given, the last ``usage`` object seen (the
+    final chunk under ``stream_options.include_usage``, or the body of
+    a plain JSON reply) is stored under ``usage_out["usage"]``.
+    """
     pending_json: List[bytes] = []
     for raw in _raw_lines(response):
         line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
@@ -210,8 +299,13 @@ def _sse_content(response) -> Iterator[str]:
             return
         try:
             obj = json.loads(chunk)
+        except ValueError:
+            continue
+        if usage_out is not None and isinstance(obj.get("usage"), Mapping):
+            usage_out["usage"] = obj["usage"]
+        try:
             delta = obj["choices"][0].get("delta", {}).get("content")
-        except (KeyError, IndexError, TypeError, ValueError):
+        except (KeyError, IndexError, TypeError):
             continue
         if delta:
             yield str(delta)
@@ -221,5 +315,7 @@ def _sse_content(response) -> Iterator[str]:
             content = obj["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, ValueError):
             return
+        if usage_out is not None and isinstance(obj.get("usage"), Mapping):
+            usage_out["usage"] = obj["usage"]
         if content:
             yield str(content)

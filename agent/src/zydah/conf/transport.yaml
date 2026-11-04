@@ -7,6 +7,9 @@ chat_path: /chat/completions
 # Sent as the reasoning_effort payload field when non-null; null omits
 # the field entirely (endpoint default effort applies).
 reasoning_effort: low
+# Ask streaming endpoints for a final usage chunk (token counts);
+# endpoints that ignore it simply report no usage.
+stream_usage: true
 timeout_seconds: 180
 retries: 1
 retry_backoff_seconds: 2
