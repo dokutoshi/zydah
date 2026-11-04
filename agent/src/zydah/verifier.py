@@ -55,6 +55,13 @@ from zydah.interface import (
 )
 from zydah.judges import extract_json_object, parse_mass_json
 from zydah.transport import chat_complete, cumulative_stats
+from zydah.trajectory import (
+    ACTION_ASK_HUMAN,
+    ACTION_COMMIT,
+    ACTION_MODEL_FOLLOWUP,
+    ACTION_PANEL,
+    trajectory_row,
+)
 
 ModelResponder = Callable[[str, str], str]
 MassElicitor = Callable[[str, FrozenSet[str], str], Mass]
@@ -414,6 +421,34 @@ class ZydahVerifier:
             )
             zydah_verdict = result[FUSED_TAG]
             validation = self.validate(zydah_verdict)
+            self._log(
+                trajectory_row(
+                    episode_id=self._run_id,
+                    step=followups,
+                    state={
+                        "width": zydah_verdict.get("width"),
+                        "conflict": zydah_verdict.get("conflict"),
+                        "bel": zydah_verdict.get("bel"),
+                        "pl": zydah_verdict.get("pl"),
+                        "best": zydah_verdict.get("best"),
+                        "decision": zydah_verdict.get("decision"),
+                        "followups_left": max_iterations - followups,
+                        "graph_unresolved": False,
+                    },
+                    action=(
+                        ACTION_COMMIT
+                        if validation["verdict"] is not False
+                        else (
+                            ACTION_ASK_HUMAN
+                            if self.responder is None or followups >= max_iterations
+                            else ACTION_PANEL
+                        )
+                    ),
+                    policy="pi_0",
+                    model_id=self.model_id,
+                    usage=_usage(),
+                )
+            )
             judge_masses = list(capture.masses) if capture is not None else []
             entry: Dict[str, object] = {
                 "validation": validation,
@@ -1272,7 +1307,31 @@ class ZydahVerifier:
             }
             validation = self.validate(zydah_verdict)
             history.append({"validation": validation, "zydah": zydah_verdict, "mass": mass})
+
+            def _traj(action: str) -> None:
+                self._log(
+                    trajectory_row(
+                        episode_id=self._run_id,
+                        step=followups,
+                        state={
+                            "width": zydah_verdict.get("width"),
+                            "conflict": zydah_verdict.get("conflict"),
+                            "bel": zydah_verdict.get("bel"),
+                            "pl": zydah_verdict.get("pl"),
+                            "best": zydah_verdict.get("best"),
+                            "decision": zydah_verdict.get("decision"),
+                            "followups_left": max_iterations - followups,
+                            "graph_unresolved": False,
+                        },
+                        action=action,
+                        policy="pi_0",
+                        model_id=self.model_id,
+                        usage=_usage(),
+                    )
+                )
+
             if validation["verdict"] is not False:
+                _traj(ACTION_COMMIT)
                 independence = self._independence(first_session, followups)
                 self._log({"event": "verify_direct", "verdict": validation["verdict"], "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict"), "usage": _usage()})
                 return {
@@ -1292,6 +1351,7 @@ class ZydahVerifier:
             history[-1]["prompt"] = prompt
             history[-1]["followup"] = followup
             if self.responder is None or followups >= max_iterations:
+                _traj(ACTION_ASK_HUMAN)
                 independence = self._independence(first_session, followups)
                 self._log({"event": "verify_direct", "verdict": False, "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict"), "usage": _usage()})
                 return {
@@ -1310,6 +1370,7 @@ class ZydahVerifier:
                 }
             answer = self.responder(prompt, self.model_id)
             if not answer or not str(answer).strip():
+                _traj(ACTION_ASK_HUMAN)
                 independence = self._independence(first_session, followups)
                 self._log({"event": "verify_direct", "verdict": False, "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict"), "usage": _usage()})
                 return {
@@ -1334,6 +1395,7 @@ class ZydahVerifier:
             resolution, graph = self._resolve_with_graph(view_text)
             if resolution is not None and resolution.status == "unresolved":
                 history[-1]["route"] = "agent_unresolved"
+                _traj(ACTION_ASK_HUMAN)
                 independence = self._independence(first_session, followups)
                 self._log({"event": "verify_direct", "verdict": False, "needs_human": True, "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict"), "usage": _usage()})
                 return {
@@ -1356,6 +1418,7 @@ class ZydahVerifier:
                 }
             if self._is_human_question(answer):
                 history[-1]["route"] = "human"
+                _traj(ACTION_ASK_HUMAN)
                 independence = self._independence(first_session, followups)
                 self._log({"event": "verify_direct", "verdict": False, "needs_human": True, "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict"), "usage": _usage()})
                 return {
@@ -1396,4 +1459,5 @@ class ZydahVerifier:
                         turn=followups + 1,
                     )
                 )
+            _traj(ACTION_MODEL_FOLLOWUP)
             followups += 1

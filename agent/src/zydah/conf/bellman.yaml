@@ -1,0 +1,27 @@
+# Bellman / TD routing (OmegaConf). Standing rule: no magic numbers
+# in code — bucket edges, discount, and costs live here.
+#
+# State buckets: width and conflict are bucketed by these edges
+# (bucket i holds edge[i-1] <= value < edge[i]); follow-ups left is
+# kept as a raw count; graph-unresolved is 0/1.
+width_edges: [0.1, 0.35, 0.7]
+conflict_edges: [0.1, 0.35, 0.7]
+
+# Q-learning (ported TD/MC learner).
+gamma: 0.95
+learning_rate: 0.05
+epsilon_start: 1.0
+epsilon_end: 0.1
+epsilon_decay_episodes: 2000
+
+# Reward: terminal +1/-1 for correct/wrong commit on labeled data,
+# minus lambda_cost * step cost. No width-reduction shaping (gameable).
+lambda_cost: 0.02
+# Relative call cost per action (panel = one call per judge).
+action_costs:
+  commit: 0
+  model-followup: 1
+  ask-human: 1
+  re-elicit-panel: 3
+
+actions: [commit, model-followup, ask-human, re-elicit-panel]

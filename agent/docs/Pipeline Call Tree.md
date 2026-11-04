@@ -134,10 +134,10 @@ are why the demo runs the non-panel path by default. The panel contract
 - Quorum replaced by the expert rule: `max(Pl)` vs `Omega` — when one
   judge is confident and the others are ignorant, the majority do not
   override the expert.
-- Bellman: v1 is trajectory logging only; v2 adds the offline TD fit
-  (see the Bellman section below).
+- Bellman: v1 trajectory logging + v2 offline TD fit shipped
+  (see the Bellman section below); routing not wired.
 
-## Bellman / TD routing (planned, not implemented)
+## Bellman / TD routing (offline learner implemented; routing not wired)
 
 Strategic hint, not a spec: the interesting question here is not
 whether a threshold can route escalation — it can — but whether
@@ -146,12 +146,16 @@ decision problem*, and what a learned policy discovers that a
 hand-set threshold cannot express. Cost-aware action selection,
 conflict as state, process-level reward: this is the seam where
 belief fusion meets sequential decision-making, and it is testable
-with the machinery below. Nothing in the tree implements it yet.
+with the machinery below. Implemented offline 2026-11-05:
+`src/zydah/trajectory.py` + `conf/bellman.yaml` (per-step rows),
+`src/zydah/td.py` (TD/MC + Q persistence), `eval/bellman_eval.py`
+(pi_0 vs TD vs MC). Live routing still uses the hand-written gate;
+Step-6 gate decided 2026-11-05 (ZYDAH-014, closed): DO NOT WIRE — evidence is synthetic-only and no live trajectory rows exist yet.
 
 The verifier loop is a sequential decision process, so routing can be
 learned instead of only thresholded. The learner is a port of an
 existing tabular Q-learning
-script (blackjack TD/MC), which transfers unchanged as an algorithm —
+script (SAB Blackjack TD/MC), which transfers unchanged as an algorithm —
 `target = r + gamma * max Q(s', a')`, TD error, epsilon-greedy — while
 its state, action, reward, and episode definitions are rebuilt for
 this domain (domain adaptation: the Q-table itself does not transfer).

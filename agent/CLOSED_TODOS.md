@@ -3,6 +3,31 @@
 Finished work, newest first. `Jira:` fills in once the Cloud sync in
 `OPEN_TODOS.md` (ZYDAH-002) is wired; `-` means not yet synced.
 
+## ZYDAH-014 — Bellman: evidence gate for learned routing
+
+- Status: done (gate decision: DO NOT WIRE)
+- Area: verifier / RL
+- Source: Bellman plan Steps 2-6, 2026-11-05
+- Closed: 2026-11-05
+- Details: Steps 2-5 shipped: `conf/bellman.yaml`, `trajectory.py`
+  (per-step `(s, a)` rows, policy `pi_0`, both verifier loops),
+  `td.py` (TD(0)/MC, SAB Blackjack `update_td` verbatim, Q save/load +
+  greedy), `eval/bellman_eval.py` (pi_0 vs TD vs MC, reference-label
+  rewards). Gate evidence reviewed 2026-11-05:
+  `outputs/suite/bellman_eval/report.json` (synthetic, 20 train /
+  20 test): pi_0 committed accuracy 0.55 at coverage 1.00; TD and MC
+  1.00 at coverage 0.55, escalate rate 0.45, mean cost 0.45.
+  Decision: DO NOT WIRE TD routing. The synthetic set is separable
+  by construction (width bucket encodes correctness), and
+  `outputs/live_demo/cycles.jsonl` contains zero trajectory rows —
+  no labeled or live evidence exists yet. Wiring condition for any
+  future ticket: TD must beat pi_0 on held-out labeled/live
+  trajectories, not synthetic ones. Live routing keeps the
+  width/conflict gate; no TD flag added.
+- Tests: `tests/suite/test_bellman.py`,
+  `tests/suite/test_bellman_eval.py` (8 tests); full suite 226
+  passed, 3 skipped, 2026-11-05.
+
 ## ZYDAH-112 — Probe GNN framework on this machine (PyTorch/MPS via uv)
 
 - Status: done
