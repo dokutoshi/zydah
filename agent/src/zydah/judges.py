@@ -233,6 +233,10 @@ class LivePanel:
         self.quorum = int(quorum)
         self.session_ids = list(session_ids) if session_ids else []
         self.last_failures: List[str] = []
+        # Per-judge outcomes from the latest elicit, aligned by judge
+        # index (mass None + error set for failures), so consumers can
+        # attribute surviving masses to the right judge/session.
+        self.last_outcomes: List[Dict[str, object]] = []
         # Optional observer called with each judge before it is asked,
         # so UIs can identify which model is about to respond.
         self.on_judge_start = on_judge_start
@@ -264,15 +268,27 @@ class LivePanel:
     def elicit(self, item_id: str = "", run: int = 0) -> List[Mass]:
         masses: List[Mass] = []
         self.last_failures = []
-        for judge in self.judges:
+        self.last_outcomes = []
+        for idx, judge in enumerate(self.judges):
+            outcome: Dict[str, object] = {
+                "index": idx,
+                "name": getattr(judge, "name", None) or f"judge-{idx + 1}",
+                "model": getattr(judge, "model", None),
+                "session_id": self.session_ids[idx]
+                if idx < len(self.session_ids)
+                else None,
+                "mass": None,
+                "error": None,
+            }
             if self.on_judge_start is not None:
                 self.on_judge_start(judge)
             try:
-                masses.append(judge.judge(item_id, self.frame))
+                outcome["mass"] = judge.judge(item_id, self.frame)
+                masses.append(outcome["mass"])  # type: ignore[arg-type]
             except Exception as exc:  # one judge down must not kill the cycle
-                self.last_failures.append(
-                    f"{getattr(judge, 'name', judge)}: {exc}"
-                )
+                outcome["error"] = str(exc)
+                self.last_failures.append(f"{outcome['name']}: {exc}")
+            self.last_outcomes.append(outcome)
         if len(masses) < self.quorum:
             raise RuntimeError(
                 f"panel quorum not met: {len(masses)}/{len(self.judges)} "

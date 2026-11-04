@@ -93,6 +93,40 @@ def test_live_panel_announces_each_judge_before_asking():
     assert seen == ["a", "b", "c"]
 
 
+def test_failed_middle_judge_keeps_survivor_identity():
+    from zydah.verifier import ZydahVerifier
+
+    panel = LivePanel(
+        FRAME,
+        judges=[
+            MetaApiJudge("muse-wonder", name="wonder"),
+            MetaApiJudge("muse-spark", name="spark"),
+            MetaApiJudge("muse-spark-open", name="spark-open"),
+        ],
+        quorum=2,
+        session_ids=["sess-1", "sess-2", "sess-3"],
+    )
+    # Replace judge bodies with deterministic stubs (identity preserved).
+    panel.judges[0].judge = lambda evidence, frame: a_mass()  # type: ignore[method-assign]
+    panel.judges[1].judge = BadJudge("muse-spark").judge  # type: ignore[method-assign]
+    panel.judges[2].judge = lambda evidence, frame: a_mass()  # type: ignore[method-assign]
+
+    verifier = ZydahVerifier(FRAME, panel=panel)
+    out = verifier.verify("claim")
+    entry = out["history"][0]
+
+    # spark failed: survivors keep their own name/model/session.
+    assert [j["name"] for j in entry["judges"]] == ["wonder", "spark-open"]
+    assert [j["session_id"] for j in entry["judges"]] == ["sess-1", "sess-3"]
+    assert entry["judges"][1]["model"] == "muse-spark-open"
+    assert len(entry["judge_masses"]) == 2
+    assert out["panel_sessions"] == ["sess-1", "sess-3"]
+    # The failure itself is recorded with its identity.
+    assert panel.last_outcomes[1]["name"] == "spark"
+    assert panel.last_outcomes[1]["mass"] is None
+    assert panel.last_outcomes[1]["error"]
+
+
 def test_live_panel_below_quorum_raises():
     panel = LivePanel(
         FRAME,

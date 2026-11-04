@@ -379,9 +379,13 @@ class ZydahVerifier:
             def __init__(self, inner):
                 self.inner = inner
                 self.masses: List = []
+                self.outcomes: List = []
 
             def elicit(self, item_id: str = "", run: int = 0):
                 self.masses = self.inner.elicit(item_id=item_id, run=run)
+                self.outcomes = list(
+                    getattr(self.inner, "last_outcomes", []) or []
+                )
                 return self.masses
 
         capture = _CapturingPanel(self.panel) if self.panel is not None else None
@@ -389,6 +393,16 @@ class ZydahVerifier:
 
         def _usage() -> Dict[str, object]:
             return _usage_delta(usage_start, cumulative_stats())
+
+        def _panel_sessions() -> List:
+            """Session ids of judges that actually returned, in order."""
+            if capture is not None and capture.outcomes:
+                return [
+                    outcome.get("session_id")
+                    for outcome in capture.outcomes
+                    if outcome.get("mass") is not None
+                ]
+            return list(getattr(self.panel, "session_ids", []) or [])
         while True:
             result = fuse_response(
                 current_evidence,
@@ -412,29 +426,47 @@ class ZydahVerifier:
                     rule=str(_require(self.cfg, "rule")),
                 )
                 entry["judge_masses"] = judge_masses
-                judges_attr = getattr(self.panel, "judges", None) or []
-                sessions = list(
-                    getattr(self.panel, "session_ids", []) or []
-                )
-                entry["judges"] = [
-                    {
-                        "name": getattr(
-                            judges_attr[i] if i < len(judges_attr) else None,
-                            "name",
-                            None,
-                        )
-                        or f"judge-{i + 1}",
-                        "model": getattr(
-                            judges_attr[i] if i < len(judges_attr) else None,
-                            "model",
-                            None,
-                        ),
-                        "session_id": sessions[i]
-                        if i < len(sessions)
-                        else None,
-                    }
-                    for i in range(len(judge_masses))
-                ]
+                if capture is not None and capture.outcomes:
+                    # Identity from per-judge outcomes: surviving masses
+                    # keep their own judge name/model/session even when
+                    # another judge failed (no positional guessing).
+                    entry["judges"] = [
+                        {
+                            "name": outcome.get("name"),
+                            "model": outcome.get("model"),
+                            "session_id": outcome.get("session_id"),
+                        }
+                        for outcome in capture.outcomes
+                        if outcome.get("mass") is not None
+                    ]
+                else:
+                    judges_attr = getattr(self.panel, "judges", None) or []
+                    sessions = list(
+                        getattr(self.panel, "session_ids", []) or []
+                    )
+                    entry["judges"] = [
+                        {
+                            "name": getattr(
+                                judges_attr[i]
+                                if i < len(judges_attr)
+                                else None,
+                                "name",
+                                None,
+                            )
+                            or f"judge-{i + 1}",
+                            "model": getattr(
+                                judges_attr[i]
+                                if i < len(judges_attr)
+                                else None,
+                                "model",
+                                None,
+                            ),
+                            "session_id": sessions[i]
+                            if i < len(sessions)
+                            else None,
+                        }
+                        for i in range(len(judge_masses))
+                    ]
             history.append(entry)
             if validation["verdict"] is not False:
                 return {
@@ -443,7 +475,7 @@ class ZydahVerifier:
                     "history": history,
                     "followups": followups,
                     "model_id": self.model_id,
-                    "panel_sessions": list(getattr(self.panel, "session_ids", []) or []),
+                    "panel_sessions": _panel_sessions(),
                     "usage": _usage(),
                 }
             followup = self.followup_payload(validation, assumptions)
@@ -460,7 +492,7 @@ class ZydahVerifier:
                     "history": history,
                     "followups": followups,
                     "model_id": self.model_id,
-                    "panel_sessions": list(getattr(self.panel, "session_ids", []) or []),
+                    "panel_sessions": _panel_sessions(),
                     "usage": _usage(),
                 }
             answer = self.responder(prompt, self.model_id)
@@ -474,7 +506,7 @@ class ZydahVerifier:
                     "history": history,
                     "followups": followups,
                     "model_id": self.model_id,
-                    "panel_sessions": list(getattr(self.panel, "session_ids", []) or []),
+                    "panel_sessions": _panel_sessions(),
                     "usage": _usage(),
                 }
             history[-1]["response"] = answer
@@ -496,7 +528,7 @@ class ZydahVerifier:
                     "history": history,
                     "followups": followups,
                     "model_id": self.model_id,
-                    "panel_sessions": list(getattr(self.panel, "session_ids", []) or []),
+                    "panel_sessions": _panel_sessions(),
                     "usage": _usage(),
                 }
             if self._is_human_question(answer):
@@ -512,7 +544,7 @@ class ZydahVerifier:
                     "history": history,
                     "followups": followups,
                     "model_id": self.model_id,
-                    "panel_sessions": list(getattr(self.panel, "session_ids", []) or []),
+                    "panel_sessions": _panel_sessions(),
                     "usage": _usage(),
                 }
             prefix = str(_require(self.cfg, "additional_info_prefix"))
