@@ -47,6 +47,7 @@ from typing import Callable, Dict, List, Mapping, Optional
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.json import JSON as RichJSON
+from rich.markdown import Markdown as RichMarkdown
 from rich.panel import Panel as RichPanel
 from rich.table import Table
 from rich.text import Text
@@ -448,17 +449,27 @@ def _streaming_responder(emit: Emit):
         emit("...Thinking")
         emit(f"[muse responder {model_id}]")
         parts: List[str] = []
+        buffer = ""
+        in_code_fence = False
         for chunk in stream_chat_complete(prompt, model_id=model_id):
-            sys.stdout.write(chunk)
-            sys.stdout.flush()
             parts.append(chunk)
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-        text = "".join(parts)
-        recorder = getattr(emit, "__self__", None)
-        if hasattr(recorder, "streamed"):
-            recorder.streamed(text)  # type: ignore[attr-defined]
-        return text
+            buffer += chunk
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                stripped = line.strip()
+                if stripped.startswith("```"):
+                    in_code_fence = not in_code_fence
+                    emit(line)
+                elif in_code_fence or not stripped:
+                    emit(line)
+                else:
+                    emit(_rich_markdown_text(line))
+        if buffer:
+            if in_code_fence or not buffer.strip():
+                emit(buffer)
+            else:
+                emit(_rich_markdown_text(buffer))
+        return "".join(parts)
 
     return responder
 
@@ -492,6 +503,7 @@ def build_verifier(
     capture_zydah_view: bool = False,
     panel: bool = False,
     panel_source: str = "yaml",
+    panel_model: Optional[str] = None,
 ):
     """Build the live verifier, adding the Springfield graph when relevant.
 
@@ -505,6 +517,15 @@ def build_verifier(
     if panel:
         if panel_source == "yaml":
             panel_cfg = load_panel_config()
+            if panel_model:
+                panel_cfg = panel_cfg.model_copy(
+                    update={
+                        "judges": [
+                            judge.model_copy(update={"model": panel_model})
+                            for judge in panel_cfg.judges
+                        ]
+                    }
+                )
             judge_count = len(panel_cfg.judges)
             make_panel = lambda sessions: LivePanel.from_config(  # noqa: E731
                 panel_cfg, FRAME, session_ids=sessions
@@ -512,11 +533,16 @@ def build_verifier(
         elif panel_source == "base":
             # Hardcoded base panel: the three base models, no YAML read.
             effort = str(PanelConfig.model_fields["effort"].default)
+            base_models = (
+                [panel_model, panel_model, panel_model]
+                if panel_model
+                else [JUDGE_WONDER, JUDGE_SPARK, JUDGE_SPARK_OPEN]
+            )
             base_judges = [
-                MetaApiJudge(JUDGE_WONDER, effort=effort, name="wonder"),
-                MetaApiJudge(JUDGE_SPARK, effort=effort, name="spark"),
+                MetaApiJudge(base_models[0], effort=effort, name="wonder"),
+                MetaApiJudge(base_models[1], effort=effort, name="spark"),
                 MetaApiJudge(
-                    JUDGE_SPARK_OPEN, effort=effort, name="spark-open"
+                    base_models[2], effort=effort, name="spark-open"
                 ),
             ]
             judge_count = len(base_judges)
@@ -537,9 +563,13 @@ def build_verifier(
         panel_obj = make_panel(judge_sessions)
 
         def _announce_judge(judge) -> None:
+            try:
+                judge_idx = panel_obj.judges.index(judge)
+            except ValueError:
+                judge_idx = 0
             line = (
-                f"[zydah] judge {getattr(judge, 'name', judge)} "
-                f"({getattr(judge, 'model', '?')}) ...Thinking"
+                f"[zydah] judge {_judge_tag(judge_idx)} "
+                f"(seat {getattr(judge, 'model', '?')}) ...Thinking"
             )
             if show_zydah:
                 emit(line)
@@ -548,7 +578,10 @@ def build_verifier(
 
         panel_obj.on_judge_start = _announce_judge
         logger.info(
-            "panel source=%s sessions: %s", panel_source, judge_sessions
+            "panel source=%s panel_model=%s sessions: %s",
+            panel_source,
+            panel_model,
+            judge_sessions,
         )
     combined = f"{question}\n{response}".lower()
     graph_resolver = None
@@ -583,11 +616,17 @@ def build_verifier(
     )
 
 
+def _judge_tag(index: int) -> str:
+    """Stable display tag for one judge seat in the Zydah Chamber."""
+    return f"ZJ-{index + 1:02d}"
+
+
 def _panel_json_record(entry: Mapping[str, object]) -> Dict:
     """Compact per-judge record for one panel cycle (Streamlit-ready).
 
-    Each judge: name, model, session id, its own mass (feedback) and
-    pignistic (individual scoring); plus the fused interval summary.
+    Each judge: ZJ tag, seat (the model in that seat), config name,
+    model, session id, its own mass (feedback), and pignistic
+    (individual scoring); plus the fused interval summary.
     """
     judges = []
     masses = entry.get("judge_masses") or []
@@ -596,6 +635,8 @@ def _panel_json_record(entry: Mapping[str, object]) -> Dict:
         meta = metas[idx] if idx < len(metas) else {}  # type: ignore[union-attr]
         judges.append(
             {
+                "tag": _judge_tag(idx),
+                "seat": meta.get("model"),
                 "name": meta.get("name") or f"judge-{idx + 1}",
                 "model": meta.get("model"),
                 "session_id": meta.get("session_id"),
@@ -626,16 +667,16 @@ def _panel_table_text(record: Mapping[str, object]) -> str:
     """
     buffer = io.StringIO()
     console = Console(file=buffer, width=100, force_terminal=False, no_color=True)
-    table = Table(title="Judge panel", header_style="bold cyan")
-    table.add_column("judge")
-    table.add_column("model")
+    table = Table(title="Zydah Chamber", header_style="bold cyan")
+    table.add_column("tag")
+    table.add_column("seat")
     for key in _MASS_KEYS:
         table.add_column(key, justify="right")
-    for judge in record.get("judges") or []:  # type: ignore[union-attr]
+    for idx, judge in enumerate(record.get("judges") or []):  # type: ignore[union-attr]
         mass = judge.get("mass") or {}
         table.add_row(
-            str(judge.get("name")),
-            str(judge.get("model")),
+            str(judge.get("tag") or _judge_tag(idx)),
+            str(judge.get("seat") or judge.get("model")),
             *(f"{float(mass.get(key, 0.0)):.2f}" for key in _MASS_KEYS),
         )
     console.print(table)
@@ -760,6 +801,48 @@ def _belief_frame_table_text(label: str, frame: Mapping[str, object]) -> str:
     return buffer.getvalue().rstrip("\n")
 
 
+def _rich_markdown_text(text: str) -> str:
+    """Render model prose as terminal-readable Rich Markdown text.
+
+    The raw model text remains the value used for scoring, logging, and
+    artifacts; this helper only produces the display form. Rich renders
+    into a plain string (no colour) so it can flow through the same emit
+    channel as the rest of the demo. Unrenderable text falls back to the
+    original prose.
+    """
+    if not text.strip():
+        return ""
+    buffer = io.StringIO()
+    console = Console(file=buffer, width=100, force_terminal=False, no_color=True)
+    try:
+        console.print(RichMarkdown(text, hyperlinks=False))
+    except Exception:
+        return text.strip("\n")
+    rendered = "\n".join(line.rstrip() for line in buffer.getvalue().splitlines())
+    return rendered.strip("\n")
+
+
+def _rich_prose_text(chunk: str) -> str:
+    """Render prose around JSON blocks, preserving transcript headers."""
+    if not chunk.strip():
+        return chunk
+    pieces: List[str] = []
+    parts = re.split(r"(\[(?:Prompt|Response) \d+\]\n?)", chunk)
+    for part in parts:
+        if not part:
+            continue
+        if re.fullmatch(r"\[(?:Prompt|Response) \d+\]\n?", part):
+            pieces.append(part)
+            continue
+        rendered = _rich_markdown_text(part)
+        if part.startswith("\n"):
+            rendered = "\n" + rendered
+        if part.endswith("\n"):
+            rendered += "\n"
+        pieces.append(rendered)
+    return "".join(pieces)
+
+
 def _rich_json_text(json_text: str) -> str:
     """Render one JSON blob with Rich (plain text when unparseable)."""
     buffer = io.StringIO()
@@ -776,8 +859,8 @@ def _rich_transcript_text(blob: str) -> str:
 
     ``format_transcript`` interleaves ``[Prompt N]`` headers, the
     transmitted follow-up JSON, and ``[Response N]`` model text. The
-    JSON blocks render with indentation/highlight structure; the
-    surrounding prose stays untouched. Log records keep the raw blob.
+    JSON blocks render with Rich JSON; surrounding model prose renders
+    with Rich Markdown. Log records keep the raw blob.
     """
     decoder = json.JSONDecoder()
     pieces: List[str] = []
@@ -785,9 +868,9 @@ def _rich_transcript_text(blob: str) -> str:
     while index < len(blob):
         start = blob.find("{", index)
         if start == -1:
-            pieces.append(blob[index:])
+            pieces.append(_rich_prose_text(blob[index:]))
             break
-        pieces.append(blob[index:start])
+        pieces.append(_rich_prose_text(blob[index:start]))
         try:
             _obj, end = decoder.raw_decode(blob, start)
         except ValueError:
@@ -1093,22 +1176,18 @@ def _stream_model_text(
         except Exception:
             box = None  # raw mode unavailable: degrade to plain stream
     if box is None:
-        # No raw terminal: stream through the same emit channel the
-        # JSON transcript records, line by line, so what the terminal
-        # shows and what the artifact holds cannot diverge.
+        # No raw terminal: collect the full response, then emit its
+        # Rich Markdown display form through the same emit channel the
+        # JSON transcript records. The raw text is returned for scoring.
         parts: List[str] = []
-        buffer = ""
         for chunk in stream_chat_complete(prompt, model_id=model_id):
             parts.append(chunk)
-            buffer += chunk
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                emit(line)
-        if buffer:
-            emit(buffer)
         text = "".join(parts)
         if not text.strip():
             return _empty_stream_fallback(prompt, model_id, emit), None
+        rendered = _rich_markdown_text(text)
+        if rendered:
+            emit(rendered)
         return text, None
 
     chunks: "queue.Queue" = queue.Queue()
@@ -1125,6 +1204,36 @@ def _stream_model_text(
     threading.Thread(target=_produce, daemon=True).start()
     parts = []
     pending: Optional[str] = None
+    display_buffer = ""
+    in_code_fence = False
+
+    def _feed_display(chunk: str, *, flush: bool = False) -> None:
+        """Feed complete lines through Rich Markdown while typing.
+
+        Markdown is rendered line-by-line in raw-terminal mode so the
+        input box can keep redrawing after each completed line. Fenced
+        code stays literal. Partial lines wait for their newline (or
+        the end of the stream) before they are rendered.
+        """
+        nonlocal display_buffer, in_code_fence
+        display_buffer += chunk
+        while "\n" in display_buffer:
+            line, display_buffer = display_buffer.split("\n", 1)
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_code_fence = not in_code_fence
+                box.feed_output(line + "\n")
+            elif in_code_fence or not stripped:
+                box.feed_output(line + "\n")
+            else:
+                box.feed_output(_rich_markdown_text(line) + "\n")
+        if flush and display_buffer:
+            line, display_buffer = display_buffer, ""
+            if in_code_fence or not line.strip():
+                box.feed_output(line)
+            else:
+                box.feed_output(_rich_markdown_text(line))
+
     try:
         while True:
             try:
@@ -1135,11 +1244,12 @@ def _stream_model_text(
                 raise item
             if isinstance(item, str):
                 parts.append(item)
-                box.feed_output(item)
+                _feed_display(item)
             submitted = box.poll_submit(0)
             if submitted is not None:
                 pending = submitted
             if item is None:
+                _feed_display("", flush=True)
                 break
     finally:
         box.__exit__()
@@ -1169,8 +1279,7 @@ def _empty_stream_fallback(prompt: str, model_id: str, emit: Emit) -> str:
         RuntimeError("stream yielded no content; fell back to plain call"),
     )
     text = chat_complete(prompt, model_id=model_id)
-    for line in text.splitlines() or [""]:
-        emit(line)
+    emit(_rich_markdown_text(text) or text)
     return text
 
 
@@ -1185,6 +1294,7 @@ def run_question(
     capture_zydah_view: bool = False,
     zydah_panel: bool = False,
     panel_source: str = "yaml",
+    panel_model: Optional[str] = None,
 ):
     """Ask the live model, score responses as they land, and pause for input."""
     if score_mode not in SCORE_MODES:
@@ -1237,6 +1347,7 @@ def run_question(
         capture_zydah_view=capture_zydah_view,
         panel=zydah_panel,
         panel_source=panel_source,
+        panel_model=panel_model,
     )
     context_lines = [f"Question: {question}", f"Response: {response}"]
     try:
@@ -1653,12 +1764,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--env", default=str(REPO_ROOT / ".env"), help="env file to load")
     parser.add_argument("--save", type=Path, help="write the latest run artifact JSON here")
     parser.add_argument("--zydah", action="store_true", help="show Zydah's internal view: thinking semaphores, follow-up transcript, per-turn belief frames")
-    parser.add_argument("--verbose", action="store_true", help="log input, model text, routing decisions, scored evidence, and Zydah's internal view to stderr (logging INFO)")
-    parser.add_argument("--log-file", type=Path, help="write INFO logs to this file via a FileHandler (no stderr redirect needed)")
+    parser.add_argument("--verbose", action="store_true", help="enable INFO logging and capture Zydah's internal view (stderr unless --log-file is given)")
+    parser.add_argument("--log-file", type=Path, help="write INFO logs to this file only (keeps the terminal/Rich view clean; no stderr redirect needed)")
     parser.add_argument("--score-mode", choices=SCORE_MODES, default=SCORE_MODE_EVERY, help="score every model response (default) or only substantive responses")
     parser.add_argument("--zydah-panel", action="store_true", help="score with the 3-judge panel (quorum 2 of 3) instead of the single-elicitor direct path")
     parser.add_argument("--panel-source", choices=["yaml", "base"], default="yaml", help="where panel judges come from: conf/panel.yaml (default) or the hardcoded base models (Wonder/Spark/Spark Open)")
+    parser.add_argument("--panel-model", help="override the model for every panel judge this run (judge names, sessions, and effort unchanged); implies --zydah-panel")
     args = parser.parse_args(argv)
+    if args.panel_model:
+        args.zydah_panel = True
     if args.save is not None:
         args.save = Path(args.save)
         if args.save.suffix != ".json":
@@ -1675,7 +1789,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.log_file:
         args.log_file.parent.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(args.log_file, encoding="utf-8"))
-    if args.verbose:
+    if args.verbose and not args.log_file:
+        # With --log-file, INFO records go to the file only: streaming
+        # them to stderr interleaves full prompts/responses with the
+        # Rich terminal view and makes model output look repeated.
         handlers.append(logging.StreamHandler(sys.stderr))
     if handlers:
         logging.basicConfig(
@@ -1722,6 +1839,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     capture_zydah_view=args.verbose,
                     zydah_panel=args.zydah_panel,
                     panel_source=args.panel_source,
+                    panel_model=args.panel_model,
                 )
             except Exception as exc:
                 _log_error("live_call", exc)

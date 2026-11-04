@@ -105,6 +105,7 @@ uv run python tools/live_demo.py --log-file trace.log
 uv run python tools/live_demo.py --score-mode substantive --log-file trace.log
 uv run python tools/live_demo.py --zydah-panel --zydah --log-file trace.log --save outputs/live_demo/latest.json
 uv run python tools/live_demo.py --zydah-panel --panel-source base --zydah
+uv run python tools/live_demo.py --zydah-panel --panel-model muse-spark --zydah
 ```
 
 Turns are labeled: `[muse turn N]` is the Nth model response and
@@ -112,7 +113,10 @@ Turns are labeled: `[muse turn N]` is the Nth model response and
 token usage). `--zydah-panel` scores with the 3-judge panel instead
 of the single elicitor; `--panel-source` selects where the judges
 come from — `yaml` (default, `conf/panel.yaml`) or `base` (the
-hardcoded Wonder/Spark/Spark Open models). With `--zydah`, each
+hardcoded Wonder/Spark/Spark Open models). `--panel-model` overrides
+the model for every judge for that run, preserving judge names,
+separate sessions, and effort (for example, all three judges on
+`muse-spark` at the YAML effort). With `--zydah`, each
 panel turn also prints a per-judge table (mass per label) and the
 fused Bel/Pl/width/conflict; the same data is logged as a compact
 `panel_json` record (per judge: model, session id, mass, pignistic)

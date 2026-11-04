@@ -529,6 +529,52 @@ def test_streaming_responder_labels_model_identity(monkeypatch):
     assert emitted[1] == "[muse responder muse-spark-1.3]"
 
 
+def test_rich_markdown_text_renders_prose_for_terminal():
+    out = live_demo._rich_markdown_text(
+        "A cat is a **feline**.\n\n- family Felidae\n- see [Cats](https://example.com/cats)"
+    )
+
+    assert "A cat is a feline." in out
+    assert "**feline**" not in out
+    assert "family Felidae" in out
+    assert "https://example.com/cats" in out
+
+
+def test_streaming_responder_renders_markdown_but_returns_raw(monkeypatch):
+    monkeypatch.setattr(
+        live_demo,
+        "stream_chat_complete",
+        lambda prompt, model_id=None: iter(["A cat is a **feline**."]),
+    )
+    emitted = []
+    responder = live_demo._streaming_responder(emitted.append)
+
+    assert responder("prompt", "muse-spark-1.3") == "A cat is a **feline**."
+    rendered = "\n".join(emitted)
+    assert "A cat is a feline." in rendered
+    assert "**feline**" not in rendered
+
+
+def test_stream_model_text_renders_markdown_but_returns_raw(monkeypatch):
+    monkeypatch.setattr(
+        live_demo,
+        "stream_chat_complete",
+        lambda prompt, model_id=None: iter(["A cat is a ", "**feline**."]),
+    )
+    monkeypatch.setattr(live_demo, "_terminal_fd", lambda: None)
+    emitted = []
+
+    text, pending = live_demo._stream_model_text(
+        "a dog is a canine but a cat is a what?", "m-test", emitted.append
+    )
+
+    assert text == "A cat is a **feline**."
+    assert pending is None
+    rendered = "\n".join(emitted)
+    assert "A cat is a feline." in rendered
+    assert "**feline**" not in rendered
+
+
 def test_empty_stream_falls_back_to_plain_call(monkeypatch):
     monkeypatch.setattr(
         live_demo, "stream_chat_complete", lambda prompt, model_id=None: iter([])
@@ -919,6 +965,39 @@ def test_log_file_captures_info_without_stderr_redirect(monkeypatch, tmp_path):
     text = log_path.read_text()
     assert "verbose logging enabled" in text
     assert "input question: 'hi'" in text
+
+
+def test_verbose_with_log_file_keeps_info_off_stderr(monkeypatch, tmp_path):
+    import logging
+
+    log_path = tmp_path / "trace.log"
+    monkeypatch.setattr(
+        live_demo,
+        "run_question",
+        lambda q, **kw: (
+            {"verdict": "good", "needs_human": False, "followups": 0, "history": []},
+            object(),
+            "resp",
+        ),
+    )
+
+    def no_terminal(prompt):
+        raise EOFError
+
+    monkeypatch.setattr(live_demo, "terminal_input", no_terminal)
+    assert (
+        live_demo.main(
+            ["--verbose", "--log-file", str(log_path), "--question", "hi"]
+        )
+        == 0
+    )
+    assert "verbose logging enabled" in log_path.read_text()
+    handlers = logging.getLogger().handlers
+    assert any(isinstance(h, logging.FileHandler) for h in handlers)
+    assert not any(
+        type(h) is logging.StreamHandler and h.stream is live_demo.sys.stderr
+        for h in handlers
+    )
 
 
 def test_excepthook_logs_and_echoes_one_line(caplog, capfd):
@@ -1472,6 +1551,70 @@ def test_main_passes_panel_source(monkeypatch):
     assert seen == ["yaml", "base"]
 
 
+def test_main_passes_panel_model(monkeypatch):
+    seen = []
+
+    def fake_run_question(question, **kwargs):
+        seen.append((kwargs.get("zydah_panel"), kwargs.get("panel_model")))
+        return (
+            {"verdict": "good", "needs_human": False, "followups": 0, "history": []},
+            object(),
+            "resp",
+        )
+
+    def no_terminal(prompt):
+        raise EOFError
+
+    monkeypatch.setattr(live_demo, "run_question", fake_run_question)
+    monkeypatch.setattr(live_demo, "terminal_input", no_terminal)
+
+    assert live_demo.main(["--question", "hi"]) == 0
+    assert (
+        live_demo.main(
+            ["--zydah-panel", "--panel-model", "muse-spark", "--question", "hi"]
+        )
+        == 0
+    )
+    assert seen == [(False, None), (True, "muse-spark")]
+
+
+def test_main_panel_model_implies_zydah_panel(monkeypatch):
+    seen = []
+
+    def fake_run_question(question, **kwargs):
+        seen.append((kwargs.get("zydah_panel"), kwargs.get("panel_model")))
+        return (
+            {"verdict": "good", "needs_human": False, "followups": 0, "history": []},
+            object(),
+            "resp",
+        )
+
+    def no_terminal(prompt):
+        raise EOFError
+
+    monkeypatch.setattr(live_demo, "run_question", fake_run_question)
+    monkeypatch.setattr(live_demo, "terminal_input", no_terminal)
+
+    assert live_demo.main(["--panel-model", "muse-spark", "--question", "hi"]) == 0
+    assert seen == [(True, "muse-spark")]
+
+
+def test_build_verifier_panel_model_overrides_yaml_judges():
+    verifier = live_demo.build_verifier(
+        "Any question?", "An answer.", "m-test",
+        panel=True, panel_source="yaml", panel_model="muse-spark",
+    )
+
+    assert [j.name for j in verifier.panel.judges] == [
+        "wonder",
+        "spark",
+        "spark-open",
+    ]
+    assert [j.model for j in verifier.panel.judges] == ["muse-spark"] * 3
+    assert [j.effort for j in verifier.panel.judges] == ["low"] * 3
+    assert len(set(verifier.panel.session_ids)) == 3
+
+
 def test_build_verifier_base_panel_skips_yaml(monkeypatch):
     def no_yaml():
         raise AssertionError("base panel must not read panel.yaml")
@@ -1488,6 +1631,24 @@ def test_build_verifier_base_panel_skips_yaml(monkeypatch):
     ]
     assert verifier.panel.quorum == 2
     assert len(verifier.panel.session_ids) == 3
+
+
+def test_build_verifier_base_panel_model_override(monkeypatch):
+    def no_yaml():
+        raise AssertionError("base panel must not read panel.yaml")
+
+    monkeypatch.setattr(live_demo, "load_panel_config", no_yaml)
+    verifier = live_demo.build_verifier(
+        "Any question?", "An answer.", "m-test",
+        panel=True, panel_source="base", panel_model="muse-spark",
+    )
+    assert [j.name for j in verifier.panel.judges] == [
+        "wonder",
+        "spark",
+        "spark-open",
+    ]
+    assert [j.model for j in verifier.panel.judges] == ["muse-spark"] * 3
+    assert [j.effort for j in verifier.panel.judges] == ["low"] * 3
 
 
 def test_panel_flag_scores_through_verify_not_verify_direct(monkeypatch):
@@ -1567,11 +1728,23 @@ def test_panel_flag_scores_through_verify_not_verify_direct(monkeypatch):
     # Terminal shows the Rich judge table + fused panel (the JSON
     # record itself stays in the INFO log via _log_panel_json).
     rendered = "\n".join(emitted)
-    assert "Judge panel" in rendered
+    assert "Zydah Chamber" in rendered
+    assert "ZJ-01" in rendered
+    assert "seat" in rendered
     assert "spark" in rendered
     assert "Fused belief" in rendered
     assert "decision: commit" in rendered
     assert "Bel 0.900" in rendered
+
+
+def test_rich_transcript_renders_response_markdown():
+    out = live_demo._rich_transcript_text(
+        "[Response 1]\nA cat is a **feline**."
+    )
+
+    assert "[Response 1]" in out
+    assert "A cat is a feline." in out
+    assert "**feline**" not in out
 
 
 def test_rich_transcript_formats_embedded_json_blocks():
@@ -1623,8 +1796,11 @@ def test_panel_json_record_pairs_each_judge_with_session_and_score():
     record = live_demo._panel_json_record(entry)
 
     assert record["fused"]["decision"] == "escalate"
+    assert record["judges"][0]["tag"] == "ZJ-01"
+    assert record["judges"][0]["seat"] == "muse-wonder"
     assert record["judges"][0]["name"] == "wonder"
     assert record["judges"][0]["model"] == "muse-wonder"
+    assert record["judges"][1]["tag"] == "ZJ-02"
     assert record["judges"][0]["session_id"] == "sess-1"
     assert record["judges"][0]["mass"]["pass"] == 0.8
     assert record["judges"][1]["pignistic"]["fail"] > 0.5
