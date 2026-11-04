@@ -3,12 +3,107 @@
 Finished work, newest first. `Jira:` fills in once the Cloud sync in
 `OPEN_TODOS.md` (ZYDAH-002) is wired; `-` means not yet synced.
 
+## ZYDAH-112 — Probe GNN framework on this machine (PyTorch/MPS via uv)
+
+- Status: done
+- Area: graph / tooling
+- Source: user direction (Apple Metal PyTorch page; install with uv)
+- Jira: ZYDAH-10
+- Closed: 2026-11-03
+- Details: probed in isolated uv envs: torch 2.15.0 installs on Python
+  3.15 but torch-geometric 2.8.1 crashes constructing `GATConv` there,
+  so PyG needs the pinned Python 3.12 graph environment (forward pass
+  OK on CPU, output shape (3, 4)); DGL not needed. Installed as the
+  optional `graph` group (`uv add --optional graph`); the core install
+  stays numpy/polars. `src/zydah/conf/graph.yaml` created with
+  device/model/training/calibration hyperparameters; device policy is
+  `auto` (MPS when available, else CPU). MPS reported False in the
+  sandboxed session — re-check on an unsandboxed run remains open.
+- Verification: `GATConv` forward pass re-verified in the project
+  `.venv` (shape (3, 4)); full `uv run pytest -q` → 126 passed,
+  3 skipped.
+
+## ZYDAH-115 — Route follow-up answers: [human] terminal vs [agent] resolution
+
+- Status: done
+- Area: verifier / routing
+- Source: live Springfield run (model asked "Which Springfield?" five
+  times and the loop burned the full Hydra budget)
+- Jira: ZYDAH-12
+- Closed: 2026-11-02
+- Details: responder answers are classified before entering the
+  ledger (`human_question_markers` in `conf/verifier.yaml`). A
+  question addressed to the human returns `needs_human` with the
+  verbatim `human_question`, consumes zero evidence follow-ups, adds
+  no `MODEL_FOLLOWUP` chunk, and renders via `format_needs_human`
+  as `[human]` / `[zydah]` pending. Agent answers may route through
+  an injected graph resolver: resolved/subset resolutions append a
+  `graph_resolution` evidence chunk; an unresolved graph generates
+  the `[human]` question from the direction partitions (East, North,
+  South, West). Both `verify` and `verify_direct` route identically.
+- Verification: `uv run pytest -q` → 110 passed, 1 skipped (3 new
+  routing tests using the live model's exact "Which Springfield"
+  phrasing; no new live call was made for this closure).
+- Addendum (human-choice resume): paused results now carry
+  Pydantic/Enum structured choices (`src/zydah/choices.py`), and
+  `resume_direct` maps a key (B -> North; `Other` -> free text) into a
+  `HumanFollowup` JSON sent to the model; the revised response is
+  appended and re-elicited, with the selection recorded as
+  `human_feedback` (an RLHF-style signal). 114 passed, 1 skipped.
+- Addendum (graph context): the follow-up now expands the chosen
+  partition via the graph — member candidates, subset-renormalized
+  resolver scores, and the original question (`HumanChoiceContext`).
+  Live RLHF test: the model received the 4 North Springfields at
+  0.25 each and correctly replied that North alone does not resolve
+  the claim, asking the next narrowing question (`needs_human`).
+
+## ZYDAH-114 — Deterministic baseline resolver + DS mass conversion
+
+- Status: done
+- Area: graph / fusion
+- Source: GNN resolver plan (prove the interface before learning)
+- Jira: ZYDAH-11
+- Closed: 2026-11-02
+- Details: `src/zydah/graph_resolver.py` implements the `Resolver`
+  protocol with `NumpyResolver`: context affinity and `faster_than`
+  signals score candidates, a temperature softmax (from
+  `conf/graph.yaml`) forms the distribution, and entropy converts to
+  Dempster-Shafer mass — singletons when confident, a subset focal
+  element when a partition concentrates (best partition by excess
+  probability over uniform share), residual on Omega. Resolution
+  reports frame, mass, candidate/partition scores, entropy
+  before/after, and resolved/subset/unresolved status.
+- Verification: `uv run pytest -q` → 107 passed, 1 skipped (5 new
+  tests in `tests/suite/test_graph_resolver.py`: all-Omega without
+  context, Chicago-timezone subset mass, falcon resolution, GT-R
+  top score, protocol conformance). Zero new dependencies.
+
+## ZYDAH-113 — Candidate graph schema and builders
+
+- Status: done
+- Area: graph
+- Source: GNN resolver plan (graph before GNN)
+- Jira: ZYDAH-16
+- Closed: 2026-11-02
+- Details: `src/zydah/graph.py` defines `GraphNode` / `GraphEdge` /
+  `CandidateGraph` with node kinds ambiguity/partition/candidate/
+  context and edge kinds candidate_of/member_of/faster_than/affinity.
+  `build_place_graph` emits the Springfield root, North/South/East/
+  West + timezone partitions (thresholds from `conf/graph.yaml`), and
+  8 candidate cities with context affinity edges.
+  `build_comparison_graph` covers BMW-vs-Nissan (model class, spec
+  faster-than edges) and bird-vs-horse (locomotion, fastest-vs-typical
+  interpretation partitions; falcon > horse resolves in-graph). No
+  ML-framework dependency.
+- Verification: `uv run pytest -q` → 99 passed, 1 skipped (6 new
+  tests in `tests/suite/test_graph.py`).
+
 ## ZYDAH-111 — Level tests: Simple vs Context-Independence
 
 - Status: done
 - Area: tests
 - Source: user question (tests per level?)
-- Jira: -
+- Jira: ZYDAH-17
 - Closed: 2026-11-02
 - Details: `tests/test_levels.py` — Simple level: weather questions over
   seeded-random states answered directly with zero follow-ups;
@@ -22,7 +117,7 @@ Finished work, newest first. `Jira:` fills in once the Cloud sync in
 - Status: done
 - Area: evidence / verifier
 - Source: approved day2 plan (anti-eavesdropping; Playgrounds A/B)
-- Jira: -
+- Jira: ZYDAH-18
 - Closed: 2026-11-02
 - Details: `src/zydah/evidence.py` adds provenance chunks (kind, model,
   session, playground, turn), original-only vs assisted views, and
@@ -41,7 +136,7 @@ Finished work, newest first. `Jira:` fills in once the Cloud sync in
 - Status: done
 - Area: packaging
 - Source: user direction ("prefer uv over .venv and pip")
-- Jira: -
+- Jira: ZYDAH-19
 - Closed: 2026-11-02
 - Details: uv 0.13.6 installed; `uv sync --extra dev` created `uv.lock`
   and a uv-managed `.venv` (old pip venv removed). README quickstart and
@@ -55,7 +150,7 @@ Finished work, newest first. `Jira:` fills in once the Cloud sync in
 - Status: done
 - Area: fusion / performance
 - Source: user direction (replace focal-pair loops with a matrix form)
-- Jira: -
+- Jira: ZYDAH-20
 - Closed: 2026-11-02
 - Details: `src/zydah/matrix.py` encodes masses as power-set bitmask
   vectors; conjunctive combination is a `bincount` contraction over a
@@ -71,7 +166,7 @@ Finished work, newest first. `Jira:` fills in once the Cloud sync in
 - Status: done
 - Area: transport / judges / verifier
 - Source: user request ("let's build it"); closes ZYDAH-005 and ZYDAH-010
-- Jira: -
+- Jira: ZYDAH-21
 - Closed: 2026-11-02
 - Details: `src/zydah/transport.py` (stdlib urllib, OpenAI-compatible)
   reads endpoint/key/model env names, chat path, timeout, and retries
@@ -89,7 +184,7 @@ Finished work, newest first. `Jira:` fills in once the Cloud sync in
 - Status: done
 - Area: verifier / packaging
 - Source: user spec (validator, prompt injector, iteration loop)
-- Jira: -
+- Jira: ZYDAH-22
 - Closed: 2026-11-02
 - Details: `ZydahVerifier` class in `src/zydah/verifier.py`: validator
   flags width/conflict above YAML thresholds (0.35); prompt injector
@@ -108,7 +203,7 @@ Finished work, newest first. `Jira:` fills in once the Cloud sync in
 - Status: done
 - Area: interface
 - Source: user request; Python API + mock panel (chosen via questions)
-- Jira: -
+- Jira: ZYDAH-23
 - Closed: 2026-11-02
 - Details: `src/zydah/interface.py` exposes `fuse_response`, `direct_verdict`,
   `fused_verdict`, and `format_tagged`. Direct arm = lead judge's
@@ -122,7 +217,7 @@ Finished work, newest first. `Jira:` fills in once the Cloud sync in
 - Status: done
 - Area: fusion / tests
 - Source: `docs/Zadeh's Paradox, Yager, and Smets A Derivation from First Principles.md`
-- Jira: -
+- Jira: ZYDAH-28
 - Closed: 2026-11-02
 - Details: 13 tests pinning the doc's own numbers — §§4–5 examples,
   §6 parametric Zadeh, §7 discontinuity paths, §§3/9 duality, §9
@@ -136,7 +231,7 @@ Finished work, newest first. `Jira:` fills in once the Cloud sync in
 - Status: done
 - Area: fusion
 - Source: derivation doc §11; gap found during review
-- Jira: -
+- Jira: ZYDAH-29
 - Closed: 2026-11-02
 - Details: added `discount_mass(mass, frame, alpha)` in `src/zydah/fusion.py`
   with formula docstring, reusing `_validate` and `_check_finite` plus a
@@ -149,7 +244,7 @@ Finished work, newest first. `Jira:` fills in once the Cloud sync in
 - Status: done
 - Area: fusion
 - Source: review finding (NaN slipped past checks, returned `{}`)
-- Jira: -
+- Jira: ZYDAH-30
 - Closed: 2026-11-02
 - Details: added `_check_finite` (NaN/±Infinity → `ValueError`) wired
   into `make_mass` and `_validate`, with a docstring explaining the NaN
@@ -162,7 +257,7 @@ Finished work, newest first. `Jira:` fills in once the Cloud sync in
 - Status: done
 - Area: fusion
 - Source: review request for `zydah/fusion.py`
-- Jira: -
+- Jira: ZYDAH-31
 - Closed: 2026-11-02
 - Details: verified conjunctive/Dempster/Yager/TBM, Bel/Pl, and pignistic
   against textbook definitions; confirmed n-ary order invariance and

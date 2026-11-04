@@ -6,12 +6,32 @@ conflict_threshold: 0.35
 tau: 0.80
 rule: yager
 world: closed
-max_iterations: 5
+max_iterations: 7
 
 good_verdict: good
 question: "Need more info, what question reduces uncertainty?"
 followup_summary: "Clarify the blocking assumption before relying on this response."
 additional_info_prefix: "\n\nAdditional information:\n"
+# A responder answer containing "?" plus any marker is a question for
+# the human, not evidence: the loop pauses as needs_human instead.
+human_question_markers: ["which", "could you", "can you", "please specify", "please clarify", "do you mean"]
+human_question_template: "Which of these applies?\n{options}"
+relationship_question_template: "How does '{clue}' relate to {candidate}? Identify any city, state, or regional relationship, or say there is none."
+# Paired marker families: each negation of a relationship claim has
+# its affirmative counterpart, so a section is judged by the same
+# vocabulary on both sides (verdict, existence, location, relevance).
+relationship_negative_markers: ["none.", "none direct", "has no", "unrelated", "not related", "no relation", "no relationship", "no direct relationship", "no connection", "no tie", "no city, state, or", "no city/state/regional relationship", "not based in", "not located in", "does not play in", "doesn't play in", "not home to", "does not help", "doesn't help"]
+relationship_affirmative_markers: ["yes", "direct state", "has a relationship", "direct relationship", "regional relationship", "related to", "connected to", "connection to", "tie to", "same state", "shares a state", "share a state", "same region", "home-state", "based in", "located in", "plays in", "play in", "home to", "helps"]
+# Bare negation words in a free-form clause ("It is not the
+# Massachusetts one") veto that clause's candidate even when no
+# relationship phrase above matches: a spelled mention is only
+# evidence when the clause is not negated.
+clause_negation_words: ["not", "n't", "never", "no"]
+# Encoder cross-check on literally-parsed relationship support: the
+# candidate's relationship summary must sit at/above this cosine
+# similarity to the candidate descriptor (label + state name).
+similarity_model: sentence-transformers/all-MiniLM-L6-v2
+similarity_threshold: 0.25
 
 direct_mass_prompt_template: |
   You are an expert evaluator. Assess the evidence below against the
@@ -30,4 +50,4 @@ direct_mass_prompt_template: |
 model:
   id: muse-spark
   env_var: ZYDAH_VERIFIER_MODEL
-  cost_tier: low
+  # Effort is a wire parameter: see reasoning_effort in transport.yaml.

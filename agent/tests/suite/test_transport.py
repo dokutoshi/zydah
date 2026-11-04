@@ -7,7 +7,7 @@ import pytest
 import zydah.judges as judges_mod
 import zydah.verifier as verifier_mod
 from zydah.judges import LivePanel, MetaApiJudge, extract_json_object
-from zydah.transport import chat_complete, load_transport_config
+from zydah.transport import chat_complete, load_transport_config, stream_chat_complete
 from zydah.verifier import make_model_responder
 
 FRAME = frozenset({"pass", "partial", "fail"})
@@ -39,8 +39,71 @@ def test_chat_complete_sends_openai_payload(api_env):
     assert out == "world"
     assert captured["url"].endswith("/chat/completions")
     assert captured["payload"]["model"] == "test-model"
+    assert captured["payload"]["reasoning_effort"] == "low"
     assert captured["payload"]["messages"][0]["content"] == "hello"
     assert captured["headers"]["Authorization"] == "Bearer test-key"
+
+
+def test_stream_chat_complete_yields_sse_deltas(api_env):
+    captured = {}
+
+    def stream_opener(url, data, headers, timeout):
+        captured["payload"] = json.loads(data.decode("utf-8"))
+        return [
+            b'data: {"choices": [{"delta": {"content": "Hello"}}]}\n',
+            b'data: {"choices": [{"delta": {"content": " world"}}]}\n',
+            b"data: [DONE]\n",
+        ]
+
+    out = "".join(stream_chat_complete("hello", opener=stream_opener))
+    assert out == "Hello world"
+    assert captured["payload"]["stream"] is True
+    assert captured["payload"]["reasoning_effort"] == "low"
+
+
+def test_reasoning_effort_omitted_when_unset(api_env):
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.create(
+        {
+            "base_url_env": "MODEL_API_BASE_URL",
+            "api_key_env": "MODEL_API_KEY",
+            "model_env": "MODEL_API_MODEL",
+            "chat_path": "/chat/completions",
+            "timeout_seconds": 5,
+            "retries": 0,
+            "retry_backoff_seconds": 0,
+        }
+    )
+    captured = {}
+    chat_complete("hello", config=cfg, opener=fake_opener_factory(captured, "world"))
+    assert "reasoning_effort" not in captured["payload"]
+
+
+def test_stream_reads_partial_sse_lines_via_read1(api_env):
+    payload = (
+        b'data: {"choices": [{"delta": {"content": "Hel'
+        b'lo"}}]}\ndata: {"choices": [{"delta": {"content": "!"}}]}\n'
+        b"data: [DONE]\n"
+    )
+    chunks = [payload[i : i + 7] for i in range(0, len(payload), 7)]
+
+    class RawResponse:
+        def read1(self, _size):
+            return chunks.pop(0) if chunks else b""
+
+    out = "".join(
+        stream_chat_complete("hello", opener=lambda *a: RawResponse())
+    )
+    assert out == "Hello!"
+
+
+def test_stream_falls_back_to_plain_json_body(api_env):
+    body = b'{"choices": [{"message": {"content": "full reply"}}]}'
+    out = "".join(
+        stream_chat_complete("hello", opener=lambda *a: [body])
+    )
+    assert out == "full reply"
 
 
 def test_chat_complete_retries_once_on_url_error(api_env):
@@ -113,3 +176,16 @@ def test_responder_factory_forwards_model_id(monkeypatch):
     monkeypatch.setattr(verifier_mod, "chat_complete", fake_chat)
     assert make_model_responder()("p", "cheap-model") == "answer"
     assert seen == {"prompt": "p", "model_id": "cheap-model"}
+
+
+def test_chat_complete_logs_prompt_and_response(api_env, caplog):
+    import logging
+
+    from zydah.transport import chat_complete
+
+    captured = {}
+    with caplog.at_level(logging.INFO, logger="zydah.transport"):
+        chat_complete("trace this prompt", opener=fake_opener_factory(captured))
+    assert "chat_complete model=" in caplog.text
+    assert "trace this prompt" in caplog.text
+    assert "chat_complete response:" in caplog.text

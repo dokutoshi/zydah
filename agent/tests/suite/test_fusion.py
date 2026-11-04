@@ -14,6 +14,7 @@ import pytest
 from zydah.fusion import (
     TotalConflictError,
     belief,
+    belief_frame,
     conjunctive_combine,
     conflict_mass,
     dempster_combine,
@@ -420,3 +421,17 @@ def test_doc_discounted_zadeh_alpha_0_9():
     assert demp[C_SET] == pytest.approx(0.4687, abs=1e-4)
     assert demp[T_SET] == pytest.approx(0.0099, abs=1e-4)
     assert demp[DOC_FRAME] == pytest.approx(0.0526, abs=1e-4)
+
+
+def test_belief_frame_serializes_full_credal_state():
+    frame = frozenset({"pass", "partial", "fail"})
+    mass = make_mass(
+        frame,
+        {"pass": 0.5, frozenset({"pass", "partial"}): 0.2, frame: 0.3},
+    )
+    value = belief_frame(mass, frame)
+    assert value["frame"] == ["fail", "partial", "pass"]
+    assert value["mass"] == pytest.approx(
+        {"pass": 0.5, "partial,pass": 0.2, "Omega": 0.3}
+    )
+    assert sum(value["mass"].values()) == pytest.approx(1.0)

@@ -8,19 +8,24 @@ variables. Unit tests inject a fake opener and make no network calls.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Callable, Dict, Mapping, Optional
+from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional
 
 from omegaconf import DictConfig, OmegaConf
 
 _CONFIG_PATH = Path(__file__).parent / "conf" / "transport.yaml"
 
+logger = logging.getLogger("zydah.transport")
+
 # opener(url, data, headers, timeout) -> parsed JSON response dict
 Opener = Callable[[str, bytes, Dict[str, str], float], Mapping]
+# stream_opener(url, data, headers, timeout) -> iterable of raw SSE lines
+StreamOpener = Callable[[str, bytes, Dict[str, str], float], Iterable[bytes]]
 
 
 def load_transport_config() -> DictConfig:
@@ -62,6 +67,9 @@ def chat_complete(
     model = env_model or model_id or _env_or_raise(cfg, "model_env")
     url = base_url.rstrip("/") + str(OmegaConf.select(cfg, "chat_path"))
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+    effort = OmegaConf.select(cfg, "reasoning_effort")
+    if effort:
+        payload["reasoning_effort"] = str(effort)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -71,6 +79,7 @@ def chat_complete(
     retries = int(OmegaConf.select(cfg, "retries"))
     backoff = float(OmegaConf.select(cfg, "retry_backoff_seconds"))
     data = json.dumps(payload).encode("utf-8")
+    logger.info("chat_complete model=%s prompt:\n%s", model, prompt)
     attempt = 0
     while True:
         try:
@@ -88,4 +97,129 @@ def chat_complete(
         content = response["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError(f"unexpected model API response shape: {sorted(response)!r}") from exc
-    return content if isinstance(content, str) else str(content)
+    text = content if isinstance(content, str) else str(content)
+    logger.info("chat_complete response:\n%s", text)
+    return text
+
+
+def _default_stream_opener(
+    url: str, data: bytes, headers: Dict[str, str], timeout: float
+) -> Iterable[bytes]:
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def stream_chat_complete(
+    prompt: str,
+    model_id: Optional[str] = None,
+    *,
+    config: Optional[DictConfig] = None,
+    opener: Optional[StreamOpener] = None,
+) -> Iterator[str]:
+    """Stream one chat call; yield content deltas as they arrive (SSE).
+
+    Same env/config resolution as ``chat_complete``, with
+    ``stream: true``. No retries: a stream that has already yielded
+    tokens cannot be replayed honestly.
+    """
+    cfg = config or load_transport_config()
+    base_url = _env_or_raise(cfg, "base_url_env")
+    api_key = _env_or_raise(cfg, "api_key_env")
+    env_model = os.environ.get(str(OmegaConf.select(cfg, "model_env")))
+    model = env_model or model_id or _env_or_raise(cfg, "model_env")
+    url = base_url.rstrip("/") + str(OmegaConf.select(cfg, "chat_path"))
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": True,
+    }
+    effort = OmegaConf.select(cfg, "reasoning_effort")
+    if effort:
+        payload["reasoning_effort"] = str(effort)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "Cache-Control": "no-cache",
+    }
+    open_fn = opener or _default_stream_opener
+    timeout = float(OmegaConf.select(cfg, "timeout_seconds"))
+    data = json.dumps(payload).encode("utf-8")
+    logger.info("stream_chat_complete model=%s prompt:\n%s", model, prompt)
+    try:
+        response = open_fn(url, data, headers, timeout)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"model API HTTP {exc.code} for model {model!r}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise RuntimeError(f"model API unreachable: {reason}") from exc
+    try:
+        chunks: List[str] = []
+        for delta in _sse_content(response):
+            chunks.append(delta)
+            yield delta
+        logger.info("stream_chat_complete response (%d chunks):\n%s", len(chunks), "".join(chunks))
+    except (urllib.error.URLError, TimeoutError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise RuntimeError(f"model API stream interrupted: {reason}") from exc
+
+
+def _raw_lines(response) -> Iterator[bytes]:
+    """Yield lines as bytes land, not as a buffered reader fills.
+
+    ``read1`` performs at most one raw socket read per call, so a
+    short SSE event is delivered immediately instead of waiting for
+    an 8 KiB buffer to fill. Falls back to line iteration for
+    file-like test doubles without ``read1``.
+    """
+    read1 = getattr(response, "read1", None)
+    if not callable(read1):
+        yield from response
+        return
+    buffer = b""
+    while True:
+        data = read1(4096)
+        if not data:
+            break
+        buffer += data
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            yield line
+    if buffer:
+        yield buffer
+
+
+def _sse_content(response) -> Iterator[str]:
+    """Parse SSE deltas; tolerate a plain JSON (non-streamed) reply."""
+    pending_json: List[bytes] = []
+    for raw in _raw_lines(response):
+        line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+        stripped = line.strip()
+        if pending_json:
+            pending_json.append(raw if isinstance(raw, bytes) else line.encode())
+            continue
+        if not stripped.startswith("data:"):
+            if stripped.startswith("{"):
+                # Endpoint ignored stream:true and sent one JSON body.
+                pending_json.append(
+                    raw if isinstance(raw, bytes) else line.encode()
+                )
+            continue
+        chunk = stripped[5:].strip()
+        if chunk == "[DONE]":
+            return
+        try:
+            obj = json.loads(chunk)
+            delta = obj["choices"][0].get("delta", {}).get("content")
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        if delta:
+            yield str(delta)
+    if pending_json:
+        try:
+            obj = json.loads(b"".join(pending_json).decode("utf-8", "replace"))
+            content = obj["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, ValueError):
+            return
+        if content:
+            yield str(content)

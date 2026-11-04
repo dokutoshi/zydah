@@ -1,0 +1,47 @@
+# Graph resolver hyperparameters (Hydra / OmegaConf).
+# Standing rule: no magic numbers in code — tune values here.
+# Consumed by the deterministic baseline resolver (ZYDAH-114) and the
+# learned PyG scorer (ZYDAH-117) through the same Resolver protocol.
+
+device: auto  # auto -> MPS when available, else CPU (Metal plugin optional)
+
+place:
+  # Candidate cities at/above this latitude belong to the North
+  # partition, the rest to South; at/above this longitude, East vs West.
+  north_south_latitude: 39.0
+  east_west_longitude: -85.0
+  state_names:
+    IL: Illinois
+    MO: Missouri
+    MA: Massachusetts
+    OH: Ohio
+    OR: Oregon
+    TN: Tennessee
+    GA: Georgia
+    VA: Virginia
+
+model:
+  hidden_dim: 64
+  num_layers: 2
+  attention_heads: 4
+  dropout: 0.1
+
+training:
+  learning_rate: 0.005
+  epochs: 200
+  seed: 11
+
+resolver:
+  context_weight: 1.0
+  partition_weight: 1.0
+  faster_weight: 1.0
+  faster_margin_scale: 100.0
+  resolved_threshold: 0.5
+  conditioning_alpha: 0.75
+  human_choice_alpha: 1.0
+
+calibration:
+  # Score entropy at/above this fraction of maximum entropy sends all
+  # mass to Omega; below it, mass splits across candidates/partitions.
+  max_entropy_fraction: 1.0
+  temperature: 1.0

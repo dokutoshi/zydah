@@ -37,6 +37,47 @@ STATUS_TARGET = {"open": "To Do", "blocked": "To Do", "in_progress": "In Progres
 PRIORITY_MAP = {"high": "High", "medium": "Medium", "low": "Low"}
 
 
+def status_target(status: str) -> str:
+    """Map a ledger status to Jira, ignoring trailing annotations.
+
+    Ledger statuses may carry notes ("in_progress (blocked on ...)"),
+    so only the leading status token decides the target.
+    """
+    match = re.match(r"[a-z_]+", status.strip().lower())
+    token = match.group(0) if match else ""
+    return STATUS_TARGET.get(token, "To Do")
+
+
+@dataclass(frozen=True)
+class EpicDef:
+    slug: str
+    branch: str
+    title: str
+
+
+# Branch-based epics (gitflow: one epic per feature branch off main).
+# When a new branch starts producing ledger items, add its range here.
+EPIC_DAY1 = EpicDef("day1-foundations", "day1", "Day 1 — Foundations")
+EPIC_EVIDENCE = EpicDef("day2-evidence-boundary", "day2-evidence-boundary", "Day 2 — Evidence Boundary")
+EPIC_GNN = EpicDef("day2-gnn-resolver", "day2-gnn-resolver", "Day 2 — GNN Resolver")
+EPIC_TRUNK = EpicDef("trunk-backlog", "main", "Main — Backlog & Tooling")
+
+
+def epic_for_item(item: "TodoItem") -> EpicDef:
+    """Branch epic for a ledger item, by its local-ID range."""
+    try:
+        number = int(item.local_id.split("-")[1])
+    except (IndexError, ValueError):
+        return EPIC_TRUNK
+    if 101 <= number <= 109:
+        return EPIC_DAY1
+    if number in (110, 111):
+        return EPIC_EVIDENCE
+    if 112 <= number <= 118:
+        return EPIC_GNN
+    return EPIC_TRUNK
+
+
 @dataclass
 class TodoItem:
     local_id: str
@@ -110,7 +151,29 @@ def adf_doc(paragraphs: List[str]) -> Dict:
     }
 
 
-def issue_fields(item: TodoItem, project_key: str) -> Dict:
+def epic_fields(
+    epic: EpicDef, project_key: str, assignee_account_id: Optional[str] = None
+) -> Dict:
+    fields = {
+        "project": {"key": project_key},
+        "summary": f"[Epic] {epic.title} (branch: {epic.branch})",
+        "issuetype": {"name": "Epic"},
+        "description": adf_doc(
+            [f"Branch epic for `{epic.branch}`. Child tasks carry zydah-NNN labels."]
+        ),
+        "labels": [f"zydah-epic-{epic.slug}", f"branch-{epic.slug}"],
+    }
+    if assignee_account_id:
+        fields["assignee"] = {"accountId": assignee_account_id}
+    return fields
+
+
+def issue_fields(
+    item: TodoItem,
+    project_key: str,
+    assignee_account_id: Optional[str] = None,
+    epic_key: Optional[str] = None,
+) -> Dict:
     paragraphs = [
         f"Local ID: {item.local_id} (source: {item.source_file}; do not remove)",
         f"Status: {item.status} | Priority: {item.priority} | Area: {item.area}",
@@ -124,7 +187,7 @@ def issue_fields(item: TodoItem, project_key: str) -> Dict:
     if item.area:
         labels.append(re.sub(r"[^a-z0-9]+", "-", item.area.lower()).strip("-"))
     labels.append("closed" if item.status == "done" else "open")
-    return {
+    fields = {
         "project": {"key": project_key},
         "summary": f"[{item.local_id}] {item.title}",
         "issuetype": {"name": "Task"},
@@ -132,6 +195,11 @@ def issue_fields(item: TodoItem, project_key: str) -> Dict:
         "labels": labels,
         "priority": {"name": PRIORITY_MAP.get(item.priority, "Medium")},
     }
+    if assignee_account_id:
+        fields["assignee"] = {"accountId": assignee_account_id}
+    if epic_key:
+        fields["parent"] = {"key": epic_key}
+    return fields
 
 
 class JiraClient:
@@ -149,6 +217,17 @@ class JiraClient:
         self.project_key = project_key
         self._auth = base64.b64encode(f"{email}:{token}".encode()).decode()
         self._sender = sender or self._http
+        self._account_id: Optional[str] = None
+
+    def current_account_id(self) -> str:
+        """Account ID of the API user (issues are assigned to them)."""
+        if self._account_id is None:
+            myself = self._sender("GET", "/rest/api/3/myself")
+            account_id = myself.get("accountId")
+            if not account_id:
+                raise RuntimeError("Jira /myself response has no accountId")
+            self._account_id = str(account_id)
+        return self._account_id
 
     def _http(self, method: str, path: str, body: Optional[Dict] = None):
         data = json.dumps(body).encode() if body is not None else None
@@ -189,12 +268,47 @@ class JiraClient:
         return None
 
 
-def sync_items(items: List[TodoItem], client: JiraClient) -> Tuple[List[TodoItem], List[PlanStep]]:
-    """Create/update/transition each item; return items with keys + plan."""
+def ensure_epics(
+    items: List[TodoItem], client: JiraClient, assignee_account_id: Optional[str]
+) -> Tuple[Dict[str, str], List[PlanStep]]:
+    """Create or adopt one Epic per branch represented in items."""
+    keys: Dict[str, str] = {}
     plan: List[PlanStep] = []
+    seen: List[EpicDef] = []
     for item in items:
-        fields = issue_fields(item, client.project_key)
-        target = STATUS_TARGET.get(item.status, "To Do")
+        epic = epic_for_item(item)
+        if epic not in seen:
+            seen.append(epic)
+    for epic in seen:
+        fields = epic_fields(epic, client.project_key, assignee_account_id)
+        found = client.find_by_label(f"zydah-epic-{epic.slug}")
+        if found:
+            key = found[0]["key"]
+            client.update(key, fields)
+            plan.append(PlanStep(f"epic:{epic.slug}", "update-epic", key, "adopted by label"))
+        else:
+            created = client.create(fields)
+            key = created["key"]
+            plan.append(PlanStep(f"epic:{epic.slug}", "create-epic", key, epic.branch))
+        keys[epic.slug] = key
+    return keys, plan
+
+
+def sync_items(
+    items: List[TodoItem],
+    client: JiraClient,
+    assignee_account_id: Optional[str] = None,
+) -> Tuple[List[TodoItem], List[PlanStep]]:
+    """Create/update/transition each item under its branch epic."""
+    epic_keys, plan = ensure_epics(items, client, assignee_account_id)
+    for item in items:
+        fields = issue_fields(
+            item,
+            client.project_key,
+            assignee_account_id,
+            epic_key=epic_keys[epic_for_item(item).slug],
+        )
+        target = status_target(item.status)
         if item.jira_key and item.jira_key != "-":
             client.update(item.jira_key, fields)
             plan.append(PlanStep(item.local_id, "update", item.jira_key))
@@ -268,12 +382,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.dry_run:
         for item in open_items + closed_items:
             action = "create" if item.jira_key in ("", "-") else "update"
-            target = STATUS_TARGET.get(item.status, "To Do")
+            target = status_target(item.status)
             print(f"{action:6} {item.local_id} -> {target}: {item.title}")
         return 0
 
     client = JiraClient(env["JIRA_BASE_URL"], env["JIRA_EMAIL"], env["JIRA_API_TOKEN"], env["JIRA_PROJECT_KEY"])
-    items, plan = sync_items(open_items + closed_items, client)
+    assignee_account_id = client.current_account_id()
+    print("assignee: API user (accountId resolved)")
+    items, plan = sync_items(open_items + closed_items, client, assignee_account_id)
     for step in plan:
         print(f"{step.action:10} {step.local_id} {step.key} {step.detail}".rstrip())
     n_open = write_keys_back(OPEN_PATH, items)

@@ -4,6 +4,9 @@ base_url_env: MODEL_API_BASE_URL
 api_key_env: MODEL_API_KEY
 model_env: MODEL_API_MODEL
 chat_path: /chat/completions
+# Sent as the reasoning_effort payload field when non-null; null omits
+# the field entirely (endpoint default effort applies).
+reasoning_effort: low
 timeout_seconds: 180
 retries: 1
 retry_backoff_seconds: 2
