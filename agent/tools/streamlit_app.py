@@ -1082,8 +1082,14 @@ def _render_exchange(exchange: Mapping, is_pending: bool) -> None:
                             )
                             tag = judge.get("tag") or f"ZJ-{idx + 1:02d}"  # type: ignore[union-attr]
                             seat = judge.get("seat") or judge.get("model") or ""  # type: ignore[union-attr]
+                            alpha = judge.get("alpha")  # type: ignore[union-attr]
+                            alpha_text = (
+                                f", alpha {float(alpha):.2f}"  # type: ignore[arg-type]
+                                if alpha is not None
+                                else ""
+                            )
                             st.markdown(
-                                f"judge {tag} (seat {seat}) belief_frame:"
+                                f"judge {tag} (seat {seat}{alpha_text}) belief_frame:"
                             )
                             _render_json_value(judge_frame)
                     if turn.get("prompt"):
