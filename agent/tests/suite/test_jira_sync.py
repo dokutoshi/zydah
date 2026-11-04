@@ -45,13 +45,18 @@ class FakeApi:
     def __call__(self, method, path, body=None):
         self.calls.append((method, path))
         if path.startswith("/rest/api/3/search/jql"):
-            return {"issues": []} if "zydah-001" in path else {"issues": [{"key": "ZYDAH-7"}]}
+            if "zydah-epic" in path or "zydah-001" in path:
+                return {"issues": []}
+            return {"issues": [{"key": "ZYDAH-7"}]}
         if method == "POST" and path == "/rest/api/3/issue":
             key = f"ZYDAH-{self.counter}"
             self.counter += 1
             self.issues[key] = {"key": key, "status": "To Do", "fields": body["fields"]}
             return {"key": key}
         if method == "PUT":
+            key = path.split("/")[4]
+            if key in self.issues and body:
+                self.issues[key]["fields"] = body["fields"]
             return {}
         if path.endswith("/transitions") and method == "GET":
             return {"transitions": [{"id": "31", "to": {"name": "Done"}}, {"id": "11", "to": {"name": "To Do"}}]}
@@ -72,6 +77,13 @@ def test_parse_todos_multiline_details():
     assert items[0].label == "zydah-001"
 
 
+def test_status_target_ignores_ledger_annotations():
+    # Ledger statuses may carry notes: "in_progress (blocked on ...)".
+    assert jira_sync.status_target("in_progress (framework installed)") == "In Progress"
+    assert jira_sync.status_target("blocked (waiting on env keys)") == "To Do"
+    assert jira_sync.status_target("done") == "Done"
+
+
 def test_issue_fields_carry_local_id_and_labels():
     (item,) = [i for i in jira_sync.parse_todos(SAMPLE, "OPEN_TODOS.md") if i.local_id == "ZYDAH-001"]
     fields = jira_sync.issue_fields(item, "ZYDAH")
@@ -79,6 +91,30 @@ def test_issue_fields_carry_local_id_and_labels():
     assert "ZYDAH-001" in text and "do the thing" in text
     assert "zydah-001" in fields["labels"] and "packaging" in fields["labels"]
     assert fields["priority"]["name"] == "High"
+
+
+def test_assignee_is_set_on_created_issues():
+    fake = FakeApi()
+    client = jira_sync.JiraClient("https://x.test", "e", "t", "ZYDAH", sender=fake)
+    items = jira_sync.parse_todos(SAMPLE, "OPEN_TODOS.md")
+    updated, _plan = jira_sync.sync_items(items, client, assignee_account_id="acct-me")
+    by_id = {i.local_id: i for i in updated}
+    created = fake.issues[by_id["ZYDAH-001"].jira_key]
+    assert created["fields"]["assignee"] == {"accountId": "acct-me"}
+
+
+def test_tasks_are_parented_under_branch_epic():
+    fake = FakeApi()
+    client = jira_sync.JiraClient("https://x.test", "e", "t", "ZYDAH", sender=fake)
+    items = jira_sync.parse_todos(SAMPLE, "OPEN_TODOS.md")
+    updated, plan = jira_sync.sync_items(items, client, assignee_account_id="acct-me")
+    epic_steps = [s for s in plan if s.action == "create-epic"]
+    assert epic_steps  # one epic per branch group, created before tasks
+    epic_key = epic_steps[0].key
+    by_id = {i.local_id: i for i in updated}
+    created = fake.issues[by_id["ZYDAH-001"].jira_key]
+    assert created["fields"]["parent"] == {"key": epic_key}
+    assert fake.issues[epic_key]["fields"]["issuetype"] == {"name": "Epic"}
 
 
 def test_sync_creates_updates_transitions_and_writes_keys(tmp_path):
