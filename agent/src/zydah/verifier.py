@@ -463,14 +463,20 @@ class ZydahVerifier:
                 entry["judge_masses"] = judge_masses
                 if capture is not None and capture.outcomes:
                     # Identity from per-judge outcomes: surviving masses
-                    # keep their own judge name/model/session even when
-                    # another judge failed (no positional guessing).
+                    # keep their own judge name/model/session/alpha even
+                    # when another judge failed (no positional guessing).
                     entry["judges"] = [
                         {
                             "name": outcome.get("name"),
                             "model": outcome.get("model"),
                             "session_id": outcome.get("session_id"),
+                            "alpha": outcome.get("alpha"),
                         }
+                        for outcome in capture.outcomes
+                        if outcome.get("mass") is not None
+                    ]
+                    entry["judge_raw_masses"] = [
+                        outcome.get("raw_mass")
                         for outcome in capture.outcomes
                         if outcome.get("mass") is not None
                     ]
@@ -499,6 +505,13 @@ class ZydahVerifier:
                             "session_id": sessions[i]
                             if i < len(sessions)
                             else None,
+                            "alpha": getattr(
+                                judges_attr[i]
+                                if i < len(judges_attr)
+                                else None,
+                                "alpha",
+                                None,
+                            ),
                         }
                         for i in range(len(judge_masses))
                     ]

@@ -21,9 +21,9 @@ from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence
 from pathlib import Path
 
 from omegaconf import OmegaConf
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from zydah.fusion import Mass, make_mass
+from zydah.fusion import Mass, discount_mass, make_mass
 from zydah.transport import chat_complete, load_transport_config
 
 JUDGE_WONDER = "muse-wonder"
@@ -42,19 +42,23 @@ class PanelJudge(BaseModel):
     name: str
     model: str = JUDGE_SPARK
     effort: Optional[str] = None
+    alpha: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class PanelConfig(BaseModel):
     """Panel settings (conf/panel.yaml through this pydantic interface).
 
     v1 quorum is 2-of-3: at least ``quorum`` judges must return a mass
-    for the cycle to fuse. Default effort is low. The judges list is
+    for the cycle to fuse. Default effort is low. Shafer reliability
+    discounting uses the panel-global ``alpha`` unless a judge entry
+    overrides it; alpha 1.0 leaves masses unchanged. The judges list is
     required — a misconfigured YAML fails validation instead of
     silently falling back to a hardcoded panel.
     """
 
     quorum: int = 2
     effort: str = "low"
+    alpha: float = Field(default=1.0, ge=0.0, le=1.0)
     judges: List[PanelJudge]
 
 
@@ -182,11 +186,16 @@ class MetaApiJudge:
         api_key: str | None = None,
         effort: Optional[str] = None,
         name: Optional[str] = None,
+        alpha: float = 1.0,
     ) -> None:
+        alpha = float(alpha)
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"alpha must be in [0, 1], got {alpha!r}")
         self.model = model
         self.api_key = api_key or os.environ.get("META_API_KEY")
         self.effort = effort
         self.name = name or model
+        self.alpha = alpha
 
     def prompt(self, evidence: str, frame: FrozenSet[str]) -> str:
         return mass_prompt(evidence, frame)
@@ -213,11 +222,14 @@ class LivePanel:
     """Judge panel over live MetaApiJudge clients (elicit-compatible).
 
     ``item_id`` carries the evidence text, matching how the pipe-through
-    interface calls panels. v1 quorum: at least ``quorum`` of the judges
-    must return a mass (default 2 of 3); individual judge failures are
-    recorded in ``last_failures`` instead of killing the cycle. Session
-    ids are provenance labels (one per judge), carried alongside the
-    masses — the transport itself is stateless.
+    interface calls panels. Each judge is elicited in a separate
+    stateless call and receives the evidence without peer masses or
+    prose; that call structure creates the silo, and the session id
+    names/audits it. v1 quorum: at least ``quorum`` of the judges must
+    return a mass (default 2 of 3); individual judge failures are
+    recorded in ``last_failures`` instead of killing the cycle. Returned
+    masses are Shafer-discounted by each judge's alpha before fusion;
+    raw masses and alphas stay in ``last_outcomes`` for audit.
     """
 
     def __init__(
@@ -254,6 +266,7 @@ class LivePanel:
                 entry.model,
                 effort=entry.effort or config.effort,
                 name=entry.name,
+                alpha=entry.alpha if entry.alpha is not None else config.alpha,
             )
             for entry in config.judges
         ]
@@ -277,13 +290,19 @@ class LivePanel:
                 "session_id": self.session_ids[idx]
                 if idx < len(self.session_ids)
                 else None,
+                "alpha": float(getattr(judge, "alpha", 1.0)),
+                "raw_mass": None,
                 "mass": None,
                 "error": None,
             }
             if self.on_judge_start is not None:
                 self.on_judge_start(judge)
             try:
-                outcome["mass"] = judge.judge(item_id, self.frame)
+                raw_mass = judge.judge(item_id, self.frame)
+                outcome["raw_mass"] = raw_mass
+                outcome["mass"] = discount_mass(
+                    raw_mass, self.frame, float(outcome["alpha"])
+                )
                 masses.append(outcome["mass"])  # type: ignore[arg-type]
             except Exception as exc:  # one judge down must not kill the cycle
                 outcome["error"] = str(exc)
