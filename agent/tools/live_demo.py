@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import logging
 import os
@@ -44,14 +45,28 @@ from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional
 
 from dotenv import load_dotenv
+from rich.console import Console
+from rich.json import JSON as RichJSON
+from rich.panel import Panel as RichPanel
+from rich.table import Table
+from rich.text import Text
 
 from zydah.choices import OTHER_VALUE
-from zydah.fusion import belief_frame
+from zydah.fusion import belief_frame, pignistic
 from zydah.graph import build_place_graph
 from zydah.graph_resolver import NumpyResolver
+from zydah.judges import (
+    JUDGE_SPARK,
+    JUDGE_SPARK_OPEN,
+    JUDGE_WONDER,
+    LivePanel,
+    MetaApiJudge,
+    PanelConfig,
+    load_panel_config,
+)
 from zydah.interface import capture_first_response
 from zydah.similarity import SentenceTransformerScorer
-from zydah.transport import chat_complete, stream_chat_complete
+from zydah.transport import chat_complete, last_call_stats, stream_chat_complete
 from zydah.verifier import (
     ZydahVerifier,
     format_needs_human,
@@ -268,6 +283,56 @@ class TerminalBox:
         return None
 
 
+_TURN_TAG = re.compile(r"^\[(muse|zydah) turn (\d+)\]")
+
+
+class TurnSequencer:
+    """Emit wrapper that pairs each turn's [muse] and [zydah] blocks.
+
+    Lines tagged ``[muse turn N]`` print immediately and release any
+    queued ``[zydah turn N]`` lines; a zydah line for a turn whose muse
+    header has not printed yet is held in the queue. Everything else
+    passes through untouched. This keeps the terminal (and the saved
+    transcript, which shares the emit channel) in muse-before-zydah
+    order per turn even when a zydah line is produced first.
+    """
+
+    def __init__(self, emit: Emit) -> None:
+        self._emit = emit
+        self._muse_seen: set = set()
+        self._pending: Dict[int, List[str]] = {}
+
+    def __getattr__(self, name: str):
+        # Delegate attributes (e.g. __self__ of a bound SaveTee.emit)
+        # so streamed-text recording keeps working through the wrapper.
+        return getattr(self._emit, name)
+
+    def __call__(self, line: object = "") -> None:
+        text = str(line)
+        match = _TURN_TAG.match(text)
+        if match is None:
+            self._emit(text)
+            return
+        turn = int(match.group(2))
+        if match.group(1) == "muse":
+            self._muse_seen.add(turn)
+            self._emit(text)
+            for queued in self._pending.pop(turn, []):
+                self._emit(queued)
+            return
+        if turn in self._muse_seen:
+            self._emit(text)
+        else:
+            self._pending.setdefault(turn, []).append(text)
+
+    def flush_pending(self) -> None:
+        """Print any held zydah lines, in turn order, so none are lost."""
+        for turn in sorted(self._pending):
+            for queued in self._pending[turn]:
+                self._emit(queued)
+        self._pending.clear()
+
+
 def _terminal_fd() -> Optional[int]:
     """Readable terminal fd for the box, or None when there is none."""
     try:
@@ -372,11 +437,16 @@ def _assumptions_for(question: str, response: str) -> List[str]:
 
 
 def _streaming_responder(emit: Emit):
-    """Follow-up responder that streams its answer as it is generated."""
+    """Follow-up responder that streams its answer as it is generated.
+
+    Internal follow-up calls are labelled with the responding model
+    (``[muse responder <model>]``) so they cannot be mistaken for a
+    turn response (``[muse turn N]``) or a judge.
+    """
 
     def responder(prompt: str, model_id: str) -> str:
         emit("...Thinking")
-        emit("[muse]")
+        emit(f"[muse responder {model_id}]")
         parts: List[str] = []
         for chunk in stream_chat_complete(prompt, model_id=model_id):
             sys.stdout.write(chunk)
@@ -420,9 +490,66 @@ def build_verifier(
     emit: Emit = print,
     show_zydah: bool = False,
     capture_zydah_view: bool = False,
+    panel: bool = False,
+    panel_source: str = "yaml",
 ):
-    """Build the live verifier, adding the Springfield graph when relevant."""
+    """Build the live verifier, adding the Springfield graph when relevant.
+
+    With ``panel=True`` (--zydah-panel), scoring runs the 3-judge panel
+    path (verify) instead of the single-elicitor direct path: judges
+    come from conf/panel.yaml (pydantic PanelConfig), one session id
+    per judge expanding the demo's existing separate-session pattern.
+    """
     cfg = load_verifier_config()
+    panel_obj = None
+    if panel:
+        if panel_source == "yaml":
+            panel_cfg = load_panel_config()
+            judge_count = len(panel_cfg.judges)
+            make_panel = lambda sessions: LivePanel.from_config(  # noqa: E731
+                panel_cfg, FRAME, session_ids=sessions
+            )
+        elif panel_source == "base":
+            # Hardcoded base panel: the three base models, no YAML read.
+            effort = str(PanelConfig.model_fields["effort"].default)
+            base_judges = [
+                MetaApiJudge(JUDGE_WONDER, effort=effort, name="wonder"),
+                MetaApiJudge(JUDGE_SPARK, effort=effort, name="spark"),
+                MetaApiJudge(
+                    JUDGE_SPARK_OPEN, effort=effort, name="spark-open"
+                ),
+            ]
+            judge_count = len(base_judges)
+            make_panel = lambda sessions: LivePanel(  # noqa: E731
+                FRAME,
+                judges=base_judges,
+                quorum=int(PanelConfig.model_fields["quorum"].default),
+                session_ids=sessions,
+            )
+        else:
+            raise ValueError(
+                f"panel_source must be 'yaml' or 'base', got {panel_source!r}"
+            )
+        judge_sessions = [
+            f"demo-judge-{idx}-{uuid.uuid4().hex[:8]}"
+            for idx in range(1, judge_count + 1)
+        ]
+        panel_obj = make_panel(judge_sessions)
+
+        def _announce_judge(judge) -> None:
+            line = (
+                f"[zydah] judge {getattr(judge, 'name', judge)} "
+                f"({getattr(judge, 'model', '?')}) ...Thinking"
+            )
+            if show_zydah:
+                emit(line)
+            if capture_zydah_view:
+                logger.info("%s", line)
+
+        panel_obj.on_judge_start = _announce_judge
+        logger.info(
+            "panel source=%s sessions: %s", panel_source, judge_sessions
+        )
     combined = f"{question}\n{response}".lower()
     graph_resolver = None
     graph_factory = None
@@ -439,6 +566,7 @@ def build_verifier(
 
     return ZydahVerifier(
         FRAME,
+        panel=panel_obj,
         responder=_streaming_responder(emit),
         mass_elicitor=_thinking_elicitor(
             base_elicitor,
@@ -453,6 +581,110 @@ def build_verifier(
         session_id=f"demo-verifier-{uuid.uuid4().hex[:8]}",
         log_path=_verifier_log_path(),
     )
+
+
+def _panel_json_record(entry: Mapping[str, object]) -> Dict:
+    """Compact per-judge record for one panel cycle (Streamlit-ready).
+
+    Each judge: name, model, session id, its own mass (feedback) and
+    pignistic (individual scoring); plus the fused interval summary.
+    """
+    judges = []
+    masses = entry.get("judge_masses") or []
+    metas = entry.get("judges") or []
+    for idx, mass in enumerate(masses):  # type: ignore[union-attr]
+        meta = metas[idx] if idx < len(metas) else {}  # type: ignore[union-attr]
+        judges.append(
+            {
+                "name": meta.get("name") or f"judge-{idx + 1}",
+                "model": meta.get("model"),
+                "session_id": meta.get("session_id"),
+                "mass": belief_frame(mass, FRAME)["mass"],  # type: ignore[arg-type]
+                "pignistic": pignistic(mass, FRAME),  # type: ignore[arg-type]
+            }
+        )
+    zydah_entry = entry.get("zydah") or {}
+    return {
+        "judges": judges,
+        "fused": {
+            key: zydah_entry.get(key)  # type: ignore[union-attr]
+            for key in ("decision", "bel", "pl", "width", "conflict")
+        },
+    }
+
+
+_MASS_KEYS = ("fail", "partial", "pass", "Omega")
+
+
+def _panel_table_text(record: Mapping[str, object]) -> str:
+    """Render one panel cycle as a Rich table + fused-belief panel.
+
+    Rendered into a string (no color) so it flows through the same
+    emit channel as the rest of the terminal view and lands in the
+    saved transcript; the machine-readable panel_json stays in the
+    INFO log at full precision.
+    """
+    buffer = io.StringIO()
+    console = Console(file=buffer, width=100, force_terminal=False, no_color=True)
+    table = Table(title="Judge panel", header_style="bold cyan")
+    table.add_column("judge")
+    table.add_column("model")
+    for key in _MASS_KEYS:
+        table.add_column(key, justify="right")
+    for judge in record.get("judges") or []:  # type: ignore[union-attr]
+        mass = judge.get("mass") or {}
+        table.add_row(
+            str(judge.get("name")),
+            str(judge.get("model")),
+            *(f"{float(mass.get(key, 0.0)):.2f}" for key in _MASS_KEYS),
+        )
+    console.print(table)
+    fused = record.get("fused") or {}
+    color = {"commit": "green", "escalate": "yellow"}.get(
+        str(fused.get("decision")), "red"  # type: ignore[union-attr]
+    )
+    body = Text.assemble(
+        ("decision: ", "bold"),
+        (str(fused.get("decision")), f"bold {color}"),  # type: ignore[union-attr]
+        f"\nBel {float(fused.get('bel') or 0):.3f}   "  # type: ignore[union-attr]
+        f"Pl {float(fused.get('pl') or 0):.3f}   "  # type: ignore[union-attr]
+        f"width {float(fused.get('width') or 0):.3f}   "  # type: ignore[union-attr]
+        f"conflict {float(fused.get('conflict') or 0):.3f}",  # type: ignore[union-attr]
+    )
+    console.print(RichPanel(body, title="Fused belief", border_style=color))
+    return buffer.getvalue().rstrip("\n")
+
+
+def _log_panel_json(result: Mapping[str, object]) -> Optional[Dict]:
+    """Log the latest panel cycle as one panel_json INFO record."""
+    history = result.get("history") or []
+    for entry in reversed(history):  # type: ignore[union-attr]
+        if isinstance(entry, Mapping) and entry.get("judge_masses"):
+            record = _panel_json_record(entry)
+            logger.info("panel_json %s", json.dumps(record))
+            return record
+    return None
+
+
+def _merge_usage(*parts) -> Dict[str, object]:
+    """Sum usage dicts (calls/elapsed/tokens); missing parts are skipped."""
+    merged: Dict[str, object] = {
+        "calls": 0,
+        "elapsed_s": 0.0,
+        "tokens_in": None,
+        "tokens_out": None,
+    }
+    for part in parts:
+        if not isinstance(part, Mapping):
+            continue
+        merged["calls"] = int(merged["calls"]) + int(part.get("calls") or 0)  # type: ignore[arg-type]
+        merged["elapsed_s"] = float(merged["elapsed_s"]) + float(part.get("elapsed_s") or 0)  # type: ignore[arg-type]
+        for key in ("tokens_in", "tokens_out"):
+            value = part.get(key)
+            if isinstance(value, int):
+                current = merged[key]
+                merged[key] = (current if isinstance(current, int) else 0) + value
+    return merged
 
 
 def _latest_belief_frame(result: Mapping[str, object]):
@@ -494,6 +726,79 @@ def _final_response_line(result: Mapping[str, object]) -> str:
     return "the response is still not dependable."
 
 
+def _frame_blocks(result: Mapping[str, object]):
+    """(label, belief-frame dict) pairs for every mass in the history."""
+    blocks = []
+    history = result.get("history") or []
+    for idx, entry in enumerate(history, start=1):  # type: ignore[union-attr]
+        if isinstance(entry, Mapping) and "mass" in entry:
+            score_turn = entry.get("score_turn")
+            iteration = entry.get("iteration")
+            if isinstance(score_turn, int) and isinstance(iteration, int):
+                label = f"turn {score_turn} iteration {iteration} belief_frame"
+            else:
+                # Untagged entry (e.g. a resume cycle): never claim a
+                # response turn we cannot prove.
+                label = f"history {idx} belief_frame"
+            blocks.append(
+                (label, belief_frame(entry["mass"], FRAME))  # type: ignore[arg-type]
+            )
+    return blocks
+
+
+def _belief_frame_table_text(label: str, frame: Mapping[str, object]) -> str:
+    """Render one belief frame as a small Rich table (label printed separately)."""
+    buffer = io.StringIO()
+    console = Console(file=buffer, width=100, force_terminal=False, no_color=True)
+    table = Table(header_style="bold cyan")
+    table.add_column("label")
+    table.add_column("mass", justify="right")
+    mass = frame.get("mass") or {}
+    for key in _MASS_KEYS:
+        table.add_row(key, f"{float(mass.get(key, 0.0)):.3f}")  # type: ignore[union-attr]
+    console.print(table)
+    return buffer.getvalue().rstrip("\n")
+
+
+def _rich_json_text(json_text: str) -> str:
+    """Render one JSON blob with Rich (plain text when unparseable)."""
+    buffer = io.StringIO()
+    console = Console(file=buffer, width=100, force_terminal=False, no_color=True)
+    try:
+        console.print(RichJSON(json_text))
+    except Exception:
+        return json_text
+    return buffer.getvalue().rstrip("\n")
+
+
+def _rich_transcript_text(blob: str) -> str:
+    """Format a follow-up transcript: prose as-is, JSON blocks via Rich.
+
+    ``format_transcript`` interleaves ``[Prompt N]`` headers, the
+    transmitted follow-up JSON, and ``[Response N]`` model text. The
+    JSON blocks render with indentation/highlight structure; the
+    surrounding prose stays untouched. Log records keep the raw blob.
+    """
+    decoder = json.JSONDecoder()
+    pieces: List[str] = []
+    index = 0
+    while index < len(blob):
+        start = blob.find("{", index)
+        if start == -1:
+            pieces.append(blob[index:])
+            break
+        pieces.append(blob[index:start])
+        try:
+            _obj, end = decoder.raw_decode(blob, start)
+        except ValueError:
+            pieces.append(blob[start : start + 1])
+            index = start + 1
+            continue
+        pieces.append(_rich_json_text(blob[start:end]))
+        index = end
+    return "".join(pieces).rstrip("\n")
+
+
 def _internal_view_lines(result: Mapping[str, object]) -> List[str]:
     """Zydah's internal view: transcript, per-turn frames, conditioning."""
     lines: List[str] = []
@@ -501,14 +806,9 @@ def _internal_view_lines(result: Mapping[str, object]) -> List[str]:
     transcript = format_transcript(history)  # type: ignore[arg-type]
     if transcript:
         lines.append(transcript)
-    for idx, entry in enumerate(history, start=1):  # type: ignore[union-attr]
-        if isinstance(entry, Mapping) and "mass" in entry:
-            lines.append(f"turn {idx} belief_frame:")
-            lines.append(
-                json.dumps(
-                    belief_frame(entry["mass"], FRAME), indent=2  # type: ignore[arg-type]
-                )
-            )
+    for label, frame in _frame_blocks(result):
+        lines.append(f"{label}:")
+        lines.append(json.dumps(frame, indent=2))
     conditioning = result.get("graph_conditioning")
     if conditioning:
         lines.append("graph_conditioning:")
@@ -527,6 +827,7 @@ def render_result(
     emit: Emit,
     show_zydah: bool = False,
     capture_zydah_view: bool = False,
+    turn: Optional[int] = None,
 ) -> None:
     """Render the verifier's current state.
 
@@ -538,21 +839,53 @@ def render_result(
     captured through ``logger.info`` without being shown on the
     terminal unless ``show_zydah`` is also enabled.
     """
-    emit(f"[zydah] {_final_response_line(result)}")
-    emit(
+    tag = f"[zydah turn {turn}]" if turn is not None else "[zydah]"
+    emit(f"{tag} {_final_response_line(result)}")
+    verdict_line = (
         "verdict={verdict} needs_human={needs_human} followups={followups}".format(
             verdict=result.get("verdict"),
             needs_human=result.get("needs_human", False),
             followups=result.get("followups", 0),
         )
     )
+    usage = result.get("usage")
+    if isinstance(usage, Mapping) and usage.get("calls"):
+        verdict_line += f" · {float(usage.get('elapsed_s') or 0):.2f}s"
+        tokens_in, tokens_out = usage.get("tokens_in"), usage.get("tokens_out")
+        if isinstance(tokens_in, int) and isinstance(tokens_out, int):
+            verdict_line += f" · {tokens_in + tokens_out} tok"
+    emit(verdict_line)
     if not show_zydah and not capture_zydah_view:
         return
-    for line in _internal_view_lines(result):
-        if show_zydah:
-            emit(line)
-        if capture_zydah_view:
+    lines = _internal_view_lines(result)
+    if capture_zydah_view:
+        for line in lines:
             logger.info("%s", line)
+    if not show_zydah:
+        return
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("[Prompt "):
+            emit(_rich_transcript_text(line))
+            index += 1
+            continue
+        if line.lstrip().startswith("{"):
+            emit(_rich_json_text(line))
+            index += 1
+            continue
+        if line.endswith("belief_frame:") and index + 1 < len(lines):
+            # Terminal: label line + Rich table. Log keeps plain JSON.
+            emit(line)
+            emit(
+                _belief_frame_table_text(
+                    line[:-1], json.loads(lines[index + 1])
+                )
+            )
+            index += 2
+            continue
+        emit(line)
+        index += 1
 
 
 def _choice_for_key(result: Mapping[str, object], key: str):
@@ -628,6 +961,10 @@ def artifact_for(question: str, response: str, result: Mapping[str, object]) -> 
         if not isinstance(entry, Mapping):
             continue
         turn = {"turn": idx}
+        if "score_turn" in entry:
+            turn["score_turn"] = entry["score_turn"]
+        if "iteration" in entry:
+            turn["iteration"] = entry["iteration"]
         if "mass" in entry:
             turn["belief_frame"] = belief_frame(entry["mass"], FRAME)  # type: ignore[arg-type]
         zydah_entry = entry.get("zydah")
@@ -648,6 +985,8 @@ def artifact_for(question: str, response: str, result: Mapping[str, object]) -> 
         "followups": result.get("followups", 0),
         "turns": turns,
     }
+    if result.get("usage"):
+        artifact["usage"] = result["usage"]
     if result.get("score_mode"):
         artifact["score_mode"] = result.get("score_mode")
     if result.get("unscored_reason"):
@@ -731,7 +1070,9 @@ class SaveTee:
         self.path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def _stream_model_text(prompt: str, model_id: str, emit: Emit):
+def _stream_model_text(
+    prompt: str, model_id: str, emit: Emit, turn: Optional[int] = None
+):
     """Stream one model response; let the human type while it lands.
 
     Async loop: a producer thread feeds response chunks into a queue
@@ -741,7 +1082,7 @@ def _stream_model_text(prompt: str, model_id: str, emit: Emit):
     plain streaming. Returns ``(response_text, pending_or_None)``.
     """
     emit("...Thinking")
-    emit("[muse]")
+    emit(f"[muse turn {turn}]" if turn is not None else "[muse]")
     fd = _terminal_fd()
     box: Optional[TerminalBox] = None
     if fd is not None:
@@ -842,6 +1183,8 @@ def run_question(
     show_zydah: bool = False,
     score_mode: str = SCORE_MODE_EVERY,
     capture_zydah_view: bool = False,
+    zydah_panel: bool = False,
+    panel_source: str = "yaml",
 ):
     """Ask the live model, score responses as they land, and pause for input."""
     if score_mode not in SCORE_MODES:
@@ -852,20 +1195,48 @@ def run_question(
     model_id = _model_id(cfg)
     logger.info("score_mode=%s", score_mode)
     logger.info("question: %r", question)
-    response, pending_direction = _stream_model_text(question, model_id, emit)
+    sequencer = TurnSequencer(emit)
+    out: Emit = sequencer  # type: ignore[assignment]
+    turn_counter = 0
+    usage_by_turn: Dict[int, Dict[str, object]] = {}
+
+    def _stream(prompt: str):
+        """Stream one model response under the next turn number."""
+        nonlocal turn_counter
+        turn_counter += 1
+        seq_before = int(last_call_stats().get("seq", 0))
+        text, pending = _stream_model_text(
+            prompt, model_id, out, turn=turn_counter
+        )
+        stats = last_call_stats()
+        if int(stats.get("seq", 0)) > seq_before:
+            usage_by_turn[turn_counter] = {
+                "calls": int(stats["seq"]) - seq_before,
+                "elapsed_s": float(stats.get("elapsed_s") or 0),
+                "tokens_in": stats.get("tokens_in"),
+                "tokens_out": stats.get("tokens_out"),
+            }
+        return text, pending, turn_counter
+
+    response, pending_direction, response_turn = _stream(question)
     logger.info("model response:\n%s", response)
     logger.info(
         "asks_human=%s pending_direction=%r",
         _asks_human(response, cfg),
         pending_direction,
     )
+    # Setup (panel judges, graph, scorer) takes time before the first
+    # score lands; tell the user Zydah is launching rather than hanging.
+    out("...launching zydah panel" if zydah_panel else "...launching zydah")
     verifier = build_verifier(
         question,
         response,
         model_id,
-        emit=emit,
+        emit=out,
         show_zydah=show_zydah,
         capture_zydah_view=capture_zydah_view,
+        panel=zydah_panel,
+        panel_source=panel_source,
     )
     context_lines = [f"Question: {question}", f"Response: {response}"]
     try:
@@ -911,11 +1282,13 @@ def run_question(
     rendered_result_id = None
     captured_result_id = None
 
-    def _score_response(current_response: str):
+    last_scored_turn: Optional[int] = None
+
+    def _score_response(current_response: str, turn: Optional[int] = None):
         """Score one landed model response and log its belief frame."""
         nonlocal checkpoint_followups, latest_result, paused_result
         nonlocal last_scored_signature, last_scored_response, rendered_result_id
-        nonlocal captured_result_id
+        nonlocal captured_result_id, last_scored_turn
         if (
             score_mode == SCORE_MODE_SUBSTANTIVE
             and not _is_substantive_response(current_response)
@@ -937,14 +1310,43 @@ def run_question(
             session_id=f"demo-model-{uuid.uuid4().hex[:8]}",
             playground="A",
         )
-        scored = verifier.verify_direct(
-            evidence,
-            first_response=first,
-            assumptions=_assumptions_for(question, current_response),
-        )
+        if zydah_panel:
+            # Panel path: 3 judges fuse per cycle (verify). No sealed
+            # first-response independence bookkeeping in v1, and human
+            # choices pause without resume (no resume_panel yet).
+            scored = verifier.verify(
+                evidence,
+                assumptions=_assumptions_for(question, current_response),
+            )
+        else:
+            scored = verifier.verify_direct(
+                evidence,
+                first_response=first,
+                assumptions=_assumptions_for(question, current_response),
+            )
         result = dict(scored)
+        if turn is not None:
+            # Tag each verifier iteration with its coordinates so the
+            # rendering can pair frames with the [muse turn N] they
+            # scored instead of numbering frames by history position.
+            result["history"] = [
+                (
+                    {**entry, "score_turn": turn, "iteration": idx}
+                    if isinstance(entry, Mapping)
+                    else entry
+                )
+                for idx, entry in enumerate(
+                    result.get("history") or [], start=1  # type: ignore[union-attr]
+                )
+            ]
         if human_conditioning is not None:
             result["graph_conditioning"] = human_conditioning
+        # Per-turn budget: this turn's streamed response plus the
+        # verifier's own calls (elicitor + follow-up responder).
+        result["usage"] = _merge_usage(
+            usage_by_turn.pop(turn, None) if turn is not None else None,
+            result.get("usage"),
+        )
         checkpoint_history.extend(result.get("history") or [])
         checkpoint_followups += int(result.get("followups", 0) or 0)
         result["history"] = list(checkpoint_history)
@@ -953,15 +1355,20 @@ def run_question(
         latest_result = result
         last_scored_signature = signature
         last_scored_response = current_response
+        last_scored_turn = turn
         _log_zydah_json(question, current_response, latest_result)
+        panel_record = _log_panel_json(latest_result) if zydah_panel else None
         if show_zydah:
             render_result(
                 latest_result,
-                emit,
+                out,
                 show_zydah=True,
                 capture_zydah_view=capture_zydah_view,
+                turn=turn,
             )
             rendered_result_id = id(latest_result)
+            if panel_record is not None:
+                out(_panel_table_text(panel_record))
             if capture_zydah_view:
                 captured_result_id = id(latest_result)
         elif capture_zydah_view:
@@ -998,9 +1405,13 @@ def run_question(
             and clarifications < clarification_limit
         ):
             clarifications += 1
-            # Call-tree order: after [muse], [zydah] prints first.
-            emit("[zydah] the model needs one detail before I can conclude.")
-            emit("[human] the model asked you a question; answer it here.")
+            # Tagged with the upcoming turn: the sequencer holds this
+            # line until the [muse turn N] header has printed.
+            out(
+                f"[zydah turn {turn_counter + 1}] the model needs one "
+                "detail before I can conclude."
+            )
+            out("[human] the model asked you a question; answer it here.")
             try:
                 human_answer = ask("[you: answer] ")
             except EOFError:
@@ -1031,22 +1442,23 @@ def run_question(
                     "\nGraph conditioning from the human's clue: "
                     f"{conditioning_text}"
                 )
-            current_response, pending_next = _stream_model_text(
-                followup_prompt, model_id, emit
+            current_response, pending_next, current_turn = _stream(
+                followup_prompt
             )
             logger.info("model response (continuation):\n%s", current_response)
             logger.info("asks_human=%s", _asks_human(current_response, cfg))
             if pending_next is not None:
                 pending_direction = pending_next
             context_lines.append(f"Response: {current_response}")
-            _score_response(current_response)
+            _score_response(current_response, turn=current_turn)
         return current_response, None
 
-    _score_response(response)
+    _score_response(response, turn=response_turn)
     paused = None
     if paused_result is None:
         response, paused = _clarify(response)
         if paused is not None:
+            sequencer.flush_pending()
             return _quit_result(paused), verifier, response
     # The human directs from the input buffer: typed text is sent as
     # a direction on Enter; an empty buffer releases Zydah to finish
@@ -1075,6 +1487,7 @@ def run_question(
                 "followups": 0,
                 "history": [],
             }
+            sequencer.flush_pending()
             return _quit_result(paused), verifier, response
         if not direction.strip():
             break
@@ -1094,19 +1507,18 @@ def run_question(
             f"Human follow-up question: {direction.strip()}\n"
             "Please answer the follow-up question."
         )
-        response, pending_next = _stream_model_text(
-            followup_prompt, model_id, emit
-        )
+        response, pending_next, gate_turn = _stream(followup_prompt)
         logger.info("model response (follow-up):\n%s", response)
         if pending_next is not None:
             pending_direction = pending_next
         context_lines.append(f"Response: {response}")
-        _score_response(response)
+        _score_response(response, turn=gate_turn)
         if paused_result is None:
             response, paused = _clarify(response)
             if paused is not None:
+                sequencer.flush_pending()
                 return _quit_result(paused), verifier, response
-    result = paused_result or _score_response(response)
+    result = paused_result or _score_response(response, turn=turn_counter)
     if result is None or last_scored_response != response:
         logger.info(
             "zydah_unscored reason=no_substantive_response mode=%s",
@@ -1125,22 +1537,32 @@ def run_question(
     if id(result) != rendered_result_id:
         render_result(
             result,
-            emit,
+            out,
             show_zydah=show_zydah,
             capture_zydah_view=(
                 capture_zydah_view and id(result) != captured_result_id
             ),
+            turn=(
+                turn_counter
+                if result.get("unscored_reason")
+                else last_scored_turn
+            ),
         )
         if capture_zydah_view:
             captured_result_id = id(result)
-    final = interact(
-        result,
-        verifier,
-        ask=ask,
-        emit=emit,
-        show_zydah=show_zydah,
-        capture_zydah_view=capture_zydah_view,
-    )
+    if zydah_panel:
+        # No resume_panel in v1: a needs_human pause stays paused.
+        final = result
+    else:
+        final = interact(
+            result,
+            verifier,
+            ask=ask,
+            emit=out,
+            show_zydah=show_zydah,
+            capture_zydah_view=capture_zydah_view,
+        )
+    sequencer.flush_pending()
     return final, verifier, response
 
 
@@ -1234,7 +1656,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--verbose", action="store_true", help="log input, model text, routing decisions, scored evidence, and Zydah's internal view to stderr (logging INFO)")
     parser.add_argument("--log-file", type=Path, help="write INFO logs to this file via a FileHandler (no stderr redirect needed)")
     parser.add_argument("--score-mode", choices=SCORE_MODES, default=SCORE_MODE_EVERY, help="score every model response (default) or only substantive responses")
+    parser.add_argument("--zydah-panel", action="store_true", help="score with the 3-judge panel (quorum 2 of 3) instead of the single-elicitor direct path")
+    parser.add_argument("--panel-source", choices=["yaml", "base"], default="yaml", help="where panel judges come from: conf/panel.yaml (default) or the hardcoded base models (Wonder/Spark/Spark Open)")
     args = parser.parse_args(argv)
+    if args.save is not None:
+        args.save = Path(args.save)
+        if args.save.suffix != ".json":
+            # A wrapped paste can split the path (outputs/live_ +
+            # demo/latest.json); fail fast instead of saving to a
+            # plausible-looking wrong file.
+            parser.error(
+                f"--save must name a .json file, got {args.save} "
+                "(quote the path if the command wrapped)"
+            )
 
     sys.excepthook = _excepthook
     handlers: List[logging.Handler] = []
@@ -1286,6 +1720,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     show_zydah=args.zydah,
                     score_mode=args.score_mode,
                     capture_zydah_view=args.verbose,
+                    zydah_panel=args.zydah_panel,
+                    panel_source=args.panel_source,
                 )
             except Exception as exc:
                 _log_error("live_call", exc)

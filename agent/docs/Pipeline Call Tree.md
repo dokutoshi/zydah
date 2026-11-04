@@ -97,7 +97,7 @@ tools/live_demo.py main()
 [zydah]    press Enter to ask another question (Ctrl-C to quit).
 ```
 
-## Panel path (inactive in the demo)
+## Panel path (opt-in in the demo via --zydah-panel)
 
 ```
 ZydahVerifier.verify(evidence)
@@ -109,8 +109,100 @@ ZydahVerifier.verify(evidence)
 ```
 
 Panel routing issues (sequential latency, judges returning all-Omega)
-are why the demo runs the non-panel path. The panel contract — 3 judges,
-never fewer — is unchanged; it is simply not the path under test here.
+are why the demo runs the non-panel path by default. The panel contract
+— 3 judges, never fewer — is unchanged; the demo reaches it only via
+`--zydah-panel` (default off, 1 elicitor vs 3 judges).
+
+**Panel v1 decisions (implemented)**
+
+- Judges are configured in `conf/panel.yaml` through the pydantic
+  `PanelConfig` interface; a judge entry without a model defaults to
+  Spark, and effort defaults to low.
+- Quorum is 2 of 3 (majority): a cycle fuses when at least 2 judges
+  return a mass; one judge failure is recorded, not fatal. Below
+  quorum the cycle raises.
+- Session ids v1: one session label per judge, expanding the demo's
+  existing separate-session pattern (muse / verifier / judge x3).
+  The transport is stateless, so ids are provenance labels.
+- Each judge sends its own configured model (the env-collapse that
+  silently merged all judges into one model is fixed).
+- v1 limits: no `resume_panel` (a needs-human pause stays paused on
+  the panel path), no sealed-first-response independence bookkeeping.
+
+**Panel v2 (planned)**
+
+- Quorum replaced by the expert rule: `max(Pl)` vs `Omega` — when one
+  judge is confident and the others are ignorant, the majority do not
+  override the expert.
+- Bellman: v1 is trajectory logging only; v2 adds the offline TD fit
+  (see the Bellman section below).
+
+## Bellman / TD routing (planned, not implemented)
+
+Strategic hint, not a spec: the interesting question here is not
+whether a threshold can route escalation — it can — but whether
+*routing under evidential uncertainty is a learnable sequential
+decision problem*, and what a learned policy discovers that a
+hand-set threshold cannot express. Cost-aware action selection,
+conflict as state, process-level reward: this is the seam where
+belief fusion meets sequential decision-making, and it is testable
+with the machinery below. Nothing in the tree implements it yet.
+
+The verifier loop is a sequential decision process, so routing can be
+learned instead of only thresholded. The learner is a port of an
+existing tabular Q-learning
+script (blackjack TD/MC), which transfers unchanged as an algorithm —
+`target = r + gamma * max Q(s', a')`, TD error, epsilon-greedy — while
+its state, action, reward, and episode definitions are rebuilt for
+this domain (domain adaptation: the Q-table itself does not transfer).
+
+- **State s** — discretized `(width bucket, conflict bucket,
+  follow-ups left, graph unresolved?)`; bucket edges are
+  hyperparameters in YAML, never literals in code. Three judge masses
+  make conflict K a state feature and give a sampled distribution
+  over next states for the expectation in the backup.
+- **Actions** — `commit`, `model follow-up`, `ask human`,
+  `re-elicit panel`. The panel becomes one costed action (3 judge
+  calls) competing with the single-elicitor follow-up (1 call), so
+  TD learns when the panel is worth its cost rather than the routing
+  being hardwired.
+- **Reward r** — terminal +1/-1 for a correct/wrong commit on labeled
+  data, minus lambda * (tokens + seconds) per step from the transport
+  usage records. No width-reduction shaping in v1: an elicitor can
+  narrow an interval without being right, so shaping is gameable.
+- **Episode** — one question through the verifier loop; terminated on
+  verdict or when `max_iterations` is exhausted.
+- **TD error as a routing signal** — `delta = r + gamma * V(s') -
+  V(s)` sits beside conflict K: K measures judge disagreement, delta
+  measures surprise against expected outcome. Both are signals, not
+  noise to normalize away.
+
+Scope: **v1 is trajectory logging only; v2 adds the offline TD fit.**
+
+Build order:
+
+1. (v1) Log `(s, a, r, s')` trajectories into `cycles.jsonl` under the
+   current threshold policy (pi_0); the panel is a logged action even
+   before it can be chosen. Trajectories record `model_id` — a model
+   swap is a new domain and stale Q must not silently apply.
+2. (v2) Port the TD/MC learner offline over those logs; hyperparameters
+   (lr, gamma, epsilon schedule, bucket edges, lambda) in YAML.
+3. Harness comparison: threshold pi_0 vs TD vs MC on escalate rate,
+   cost per resolved question, and accuracy.
+4. Only if TD wins: the learned Q gates `validate()` beside the
+   width/conflict gate.
+
+Exploration (epsilon-greedy) is confined to the harness and offline
+logs — never the live demo, where a random action could commit a bad
+verdict or interrogate the human at random. Sampling note: model
+collapse is not mode collapse. The same model under three independent
+session ids yields three iid draws from that model's distribution
+(independent contexts, stochastic decoding), so K honestly measures
+intra-model disagreement and the panel meets the iid criterion for
+sampling. What it does not provide is cross-model corroboration:
+three draws still describe one model's distribution. Only a
+deterministic (temperature-zero) endpoint degenerates the three
+draws into one repeated sample.
 
 ## How Zydah steers the context (verified against the code)
 

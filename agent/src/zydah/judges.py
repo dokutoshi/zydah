@@ -18,7 +18,10 @@ import os
 import random
 from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence
 
+from pathlib import Path
+
 from omegaconf import OmegaConf
+from pydantic import BaseModel
 
 from zydah.fusion import Mass, make_mass
 from zydah.transport import chat_complete, load_transport_config
@@ -29,6 +32,35 @@ JUDGE_SPARK_OPEN = "muse-spark-open"
 PANEL = (JUDGE_WONDER, JUDGE_SPARK, JUDGE_SPARK_OPEN)
 
 SPARK_OPEN_BASETEN_ID = "meta-models/muse-spark-open-1026"
+
+_PANEL_CONFIG_PATH = Path(__file__).parent / "conf" / "panel.yaml"
+
+
+class PanelJudge(BaseModel):
+    """One judge entry in panel.yaml; model defaults to Spark."""
+
+    name: str
+    model: str = JUDGE_SPARK
+    effort: Optional[str] = None
+
+
+class PanelConfig(BaseModel):
+    """Panel settings (conf/panel.yaml through this pydantic interface).
+
+    v1 quorum is 2-of-3: at least ``quorum`` judges must return a mass
+    for the cycle to fuse. Default effort is low. The judges list is
+    required — a misconfigured YAML fails validation instead of
+    silently falling back to a hardcoded panel.
+    """
+
+    quorum: int = 2
+    effort: str = "low"
+    judges: List[PanelJudge]
+
+
+def load_panel_config(path: Optional[Path] = None) -> PanelConfig:
+    cfg = OmegaConf.load(path or _PANEL_CONFIG_PATH)
+    return PanelConfig(**OmegaConf.to_container(cfg, resolve=True))  # type: ignore[arg-type]
 
 OMEGA_KEYS = frozenset({"omega", "Ω", "*", "uncertain", "unknown", "ignorance"})
 _COMPOUND_SEPARATORS = ("+", ",", "|")
@@ -60,15 +92,24 @@ def parse_mass_json(payload: Mapping[str, float], frame: FrozenSet[str]) -> Mass
     return make_mass(frame, assign)
 
 
+LABEL_ANCHORS = (
+    "Label meanings: pass = the evidence supports the claim; "
+    "partial = the evidence partly supports and partly contradicts the "
+    "claim, or covers only part of it; fail = the evidence contradicts "
+    "the claim; omega = the evidence is insufficient to decide. Do not "
+    "use fail merely because a claim is unproven: unproven means omega."
+)
+
+
 def mass_prompt(evidence: str, frame: FrozenSet[str]) -> str:
     """Prompt template eliciting structured JSON masses from a judge."""
     labels = sorted(frame)
     return (
         "You are an expert evaluator. Assess the evidence below against the "
-        f"labels {labels}.\n\nReturn ONLY a JSON object mapping each label to "
-        "a probability mass, plus an \"omega\" key for your ignorance "
-        "(mass you cannot commit to any label). Masses must be non-negative "
-        "numbers summing to 1. Example: "
+        f"labels {labels}.\n\n{LABEL_ANCHORS}\n\nReturn ONLY a JSON object "
+        "mapping each label to a probability mass, plus an \"omega\" key "
+        "for your ignorance (mass you cannot commit to any label). Masses "
+        "must be non-negative numbers summing to 1. Example: "
         '{"' + '": 0.6, "'.join(labels) + '": 0.1, "omega": 0.3}.\n\n'
         f"Evidence:\n{evidence}"
     )
@@ -135,9 +176,17 @@ class MetaApiJudge:
     when set; otherwise the judge's own ``model`` name is sent.
     """
 
-    def __init__(self, model: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: str | None = None,
+        effort: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
         self.model = model
         self.api_key = api_key or os.environ.get("META_API_KEY")
+        self.effort = effort
+        self.name = name or model
 
     def prompt(self, evidence: str, frame: FrozenSet[str]) -> str:
         return mass_prompt(evidence, frame)
@@ -148,13 +197,15 @@ class MetaApiJudge:
     def parse_text(self, text: str, frame: FrozenSet[str]) -> Mass:
         return parse_mass_json(extract_json_object(text), frame)
 
-    def _live_model(self) -> str:
-        cfg = load_transport_config()
-        env_model = os.environ.get(str(OmegaConf.select(cfg, "model_env")))
-        return env_model or self.model
-
     def judge(self, evidence: str, frame: FrozenSet[str]) -> Mass:
-        text = chat_complete(self.prompt(evidence, frame), model_id=self._live_model())
+        # The judge's own configured model is sent; the transport may
+        # still resolve an endpoint deployment override. (Previously an
+        # env lookup here collapsed every judge to one model.)
+        text = chat_complete(
+            self.prompt(evidence, frame),
+            model_id=self.model,
+            reasoning_effort=self.effort,
+        )
         return self.parse_text(text, frame)
 
 
@@ -162,22 +213,89 @@ class LivePanel:
     """Judge panel over live MetaApiJudge clients (elicit-compatible).
 
     ``item_id`` carries the evidence text, matching how the pipe-through
-    interface calls panels. One mass per judge, in judge order.
+    interface calls panels. v1 quorum: at least ``quorum`` of the judges
+    must return a mass (default 2 of 3); individual judge failures are
+    recorded in ``last_failures`` instead of killing the cycle. Session
+    ids are provenance labels (one per judge), carried alongside the
+    masses — the transport itself is stateless.
     """
 
     def __init__(
         self,
         frame: FrozenSet[str],
-        judges: Optional[Sequence[MetaApiJudge]] = None,
+        judges: Sequence[MetaApiJudge],
+        quorum: int = 2,
+        session_ids: Optional[Sequence[str]] = None,
+        on_judge_start=None,
     ) -> None:
         self.frame = frozenset(frame)
-        self.judges = list(
-            judges
-            or [MetaApiJudge(JUDGE_WONDER), MetaApiJudge(JUDGE_SPARK), BasetenJudge()]
+        self.judges = list(judges)
+        self.quorum = int(quorum)
+        self.session_ids = list(session_ids) if session_ids else []
+        self.last_failures: List[str] = []
+        # Per-judge outcomes from the latest elicit, aligned by judge
+        # index (mass None + error set for failures), so consumers can
+        # attribute surviving masses to the right judge/session.
+        self.last_outcomes: List[Dict[str, object]] = []
+        # Optional observer called with each judge before it is asked,
+        # so UIs can identify which model is about to respond.
+        self.on_judge_start = on_judge_start
+
+    @classmethod
+    def from_config(
+        cls,
+        config: PanelConfig,
+        frame: FrozenSet[str],
+        session_ids: Optional[Sequence[str]] = None,
+        on_judge_start=None,
+    ) -> "LivePanel":
+        judges = [
+            MetaApiJudge(
+                entry.model,
+                effort=entry.effort or config.effort,
+                name=entry.name,
+            )
+            for entry in config.judges
+        ]
+        return cls(
+            frame,
+            judges=judges,
+            quorum=config.quorum,
+            session_ids=session_ids,
+            on_judge_start=on_judge_start,
         )
 
     def elicit(self, item_id: str = "", run: int = 0) -> List[Mass]:
-        return [judge.judge(item_id, self.frame) for judge in self.judges]
+        masses: List[Mass] = []
+        self.last_failures = []
+        self.last_outcomes = []
+        for idx, judge in enumerate(self.judges):
+            outcome: Dict[str, object] = {
+                "index": idx,
+                "name": getattr(judge, "name", None) or f"judge-{idx + 1}",
+                "model": getattr(judge, "model", None),
+                "session_id": self.session_ids[idx]
+                if idx < len(self.session_ids)
+                else None,
+                "mass": None,
+                "error": None,
+            }
+            if self.on_judge_start is not None:
+                self.on_judge_start(judge)
+            try:
+                outcome["mass"] = judge.judge(item_id, self.frame)
+                masses.append(outcome["mass"])  # type: ignore[arg-type]
+            except Exception as exc:  # one judge down must not kill the cycle
+                outcome["error"] = str(exc)
+                self.last_failures.append(f"{outcome['name']}: {exc}")
+            self.last_outcomes.append(outcome)
+        if len(masses) < self.quorum:
+            raise RuntimeError(
+                f"panel quorum not met: {len(masses)}/{len(self.judges)} "
+                f"judges returned (need {self.quorum}); "
+                f"failures: {self.last_failures}"
+            )
+        return masses
 
 
 class BasetenJudge(MetaApiJudge):

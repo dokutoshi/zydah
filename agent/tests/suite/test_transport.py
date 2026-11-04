@@ -189,3 +189,46 @@ def test_chat_complete_logs_prompt_and_response(api_env, caplog):
     assert "chat_complete model=" in caplog.text
     assert "trace this prompt" in caplog.text
     assert "chat_complete response:" in caplog.text
+
+
+def test_chat_complete_records_usage_and_elapsed(api_env):
+    from zydah.transport import last_call_stats
+
+    def opener(url, data, headers, timeout):
+        return {
+            "choices": [{"message": {"content": "world"}}],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+            },
+        }
+
+    assert chat_complete("hello", opener=opener) == "world"
+    stats = last_call_stats()
+    assert stats["tokens_in"] == 11
+    assert stats["tokens_out"] == 7
+    assert stats["elapsed_s"] >= 0
+    assert stats["stream"] is False
+
+
+def test_stream_records_usage_from_final_chunk(api_env):
+    from zydah.transport import last_call_stats
+
+    captured = {}
+
+    def stream_opener(url, data, headers, timeout):
+        captured["payload"] = json.loads(data.decode("utf-8"))
+        return [
+            b'data: {"choices": [{"delta": {"content": "Hi"}}]}\n',
+            b'data: {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3}}\n',
+            b"data: [DONE]\n",
+        ]
+
+    out = "".join(stream_chat_complete("hello", opener=stream_opener))
+    assert out == "Hi"
+    assert captured["payload"]["stream_options"] == {"include_usage": True}
+    stats = last_call_stats()
+    assert stats["tokens_in"] == 5
+    assert stats["tokens_out"] == 3
+    assert stats["stream"] is True

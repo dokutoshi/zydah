@@ -9,9 +9,15 @@ from zydah.interface import (
     fuse_response,
     fused_verdict,
 )
+from zydah.judges import SeededMockPanel
 
 FRAME = frozenset({"pass", "partial", "fail"})
 OMEGA = ("pass", "partial", "fail")
+
+
+def mock_panel() -> SeededMockPanel:
+    """The deterministic offline panel, injected explicitly."""
+    return SeededMockPanel(FRAME, seed=0)
 
 
 class StubPanel:
@@ -24,19 +30,26 @@ class StubPanel:
         return list(self._masses)
 
 
+def test_fuse_response_requires_explicit_panel():
+    with pytest.raises(TypeError, match="panel"):
+        fuse_response("some agent output", FRAME)  # type: ignore[call-arg]
+
+
 def test_fuse_response_has_both_tagged_arms():
-    out = fuse_response("some agent output", FRAME)
+    out = fuse_response("some agent output", FRAME, mock_panel())
     assert set(out) == {"muse", "zydah"}
     assert out["muse"]["verdict"] in FRAME
     assert out["zydah"]["decision"] in {"commit", "reject", "escalate"}
 
 
 def test_fuse_response_is_deterministic_per_evidence():
-    assert fuse_response("ev-1", FRAME) == fuse_response("ev-1", FRAME)
+    assert fuse_response("ev-1", FRAME, mock_panel()) == fuse_response(
+        "ev-1", FRAME, mock_panel()
+    )
 
 
 def test_format_tagged_renders_both_tags():
-    text = format_tagged(fuse_response("ev-1", FRAME))
+    text = format_tagged(fuse_response("ev-1", FRAME, mock_panel()))
     assert "[muse]" in text
     assert "[zydah]" in text
     # Attribution by cycle: [muse] is the first response.
@@ -44,7 +57,7 @@ def test_format_tagged_renders_both_tags():
 
 
 def test_format_tagged_includes_verifier_outcome():
-    result = fuse_response("ev-1", FRAME)
+    result = fuse_response("ev-1", FRAME, mock_panel())
     verification = {"verdict": "good", "followups": 2, "model_id": "m1"}
     text = format_tagged(result, verification)
     assert "verifier: good followups=2 model=m1" in text.split("[zydah]")[1]
@@ -83,4 +96,4 @@ def test_fused_arm_tbm_total_conflict_abstains_escalates():
 
 def test_unknown_rule_rejected():
     with pytest.raises(ValueError, match="unknown fusion rule"):
-        fuse_response("x", FRAME, rule="bogus")
+        fuse_response("x", FRAME, mock_panel(), rule="bogus")

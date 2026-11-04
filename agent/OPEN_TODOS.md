@@ -223,3 +223,25 @@ Sync contract (for the future script, not yet built):
   emitted masses, and route taken per case; offline suite green;
   live Springfield run terminates by resolution or `needs_human`,
   not by budget exhaustion.
+
+## ZYDAH-013 — Optimizer: bitmask focal sets + NumPy combination in fusion core
+
+- Status: open
+- Priority: low
+- Area: fusion / performance
+- Source: user optimizer note, 2026-11-04
+- Updated: 2026-11-04
+- Details: `src/zydah/fusion.py` represents focal elements as
+  frozensets and combines via `itertools.product` (correctness first:
+  simultaneous n-ary, order-invariant). Prior measurement: switching
+  focal sets to bitmask integers gave ~2x in pure Python, and NumPy
+  added another ~2x on top of `itertools.product`. Worth doing only
+  when panel size or frame size grows; current 3-judge x <=4-focal
+  cycles are <=64 combinations, so this is headroom, not a bottleneck
+  fix. Public `Mass` type stays dict-of-frozensets; bitmask/NumPy is
+  an internal representation behind the same functions.
+- Acceptance: benchmark script compares current vs bitmask vs
+  NumPy paths on representative frames; results identical within
+  float tolerance on the existing fusion test suite (order invariance,
+  Zadeh, total conflict); speedup numbers recorded in the benchmark
+  output before any path becomes default.
