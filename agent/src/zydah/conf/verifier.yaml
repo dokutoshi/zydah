@@ -22,11 +22,14 @@ relationship_question_template: "How does '{clue}' relate to {candidate}? Identi
 # vocabulary on both sides (verdict, existence, location, relevance).
 relationship_negative_markers: ["none.", "none direct", "has no", "unrelated", "not related", "no relation", "no relationship", "no direct relationship", "no connection", "no tie", "no city, state, or", "no city/state/regional relationship", "not based in", "not located in", "does not play in", "doesn't play in", "not home to", "does not help", "doesn't help"]
 relationship_affirmative_markers: ["yes", "direct state", "has a relationship", "direct relationship", "regional relationship", "related to", "connected to", "connection to", "tie to", "same state", "shares a state", "share a state", "same region", "home-state", "based in", "located in", "plays in", "play in", "home to", "helps"]
-# Bare negation words in a free-form clause ("It is not the
-# Massachusetts one") veto that clause's candidate even when no
+# Negation words and multi-word exclusion phrases in a free-form
+# clause ("It is not the Massachusetts one", "anywhere but
+# Massachusetts") veto that clause's candidate even when no
 # relationship phrase above matches: a spelled mention is only
-# evidence when the clause is not negated.
-clause_negation_words: ["not", "n't", "never", "no"]
+# evidence when the clause is not negated. Multi-word phrases only —
+# bare "but" is deliberately absent so benign contrast ("It's the
+# Massachusetts one, but I could be wrong") still counts.
+clause_negation_words: ["not", "n't", "never", "no", "anywhere but", "other than", "except", "instead of", "rather than", "not the"]
 # Encoder cross-check on literally-parsed relationship support: the
 # candidate's relationship summary must sit at/above this cosine
 # similarity to the candidate descriptor (label + state name).

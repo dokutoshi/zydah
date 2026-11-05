@@ -55,6 +55,13 @@ from zydah.interface import (
 )
 from zydah.judges import extract_json_object, parse_mass_json
 from zydah.transport import chat_complete, cumulative_stats
+from zydah.trajectory import (
+    ACTION_ASK_HUMAN,
+    ACTION_COMMIT,
+    ACTION_MODEL_FOLLOWUP,
+    ACTION_PANEL,
+    trajectory_row,
+)
 
 ModelResponder = Callable[[str, str], str]
 MassElicitor = Callable[[str, FrozenSet[str], str], Mass]
@@ -414,6 +421,34 @@ class ZydahVerifier:
             )
             zydah_verdict = result[FUSED_TAG]
             validation = self.validate(zydah_verdict)
+            self._log(
+                trajectory_row(
+                    episode_id=self._run_id,
+                    step=followups,
+                    state={
+                        "width": zydah_verdict.get("width"),
+                        "conflict": zydah_verdict.get("conflict"),
+                        "bel": zydah_verdict.get("bel"),
+                        "pl": zydah_verdict.get("pl"),
+                        "best": zydah_verdict.get("best"),
+                        "decision": zydah_verdict.get("decision"),
+                        "followups_left": max_iterations - followups,
+                        "graph_unresolved": False,
+                    },
+                    action=(
+                        ACTION_COMMIT
+                        if validation["verdict"] is not False
+                        else (
+                            ACTION_ASK_HUMAN
+                            if self.responder is None or followups >= max_iterations
+                            else ACTION_PANEL
+                        )
+                    ),
+                    policy="pi_0",
+                    model_id=self.model_id,
+                    usage=_usage(),
+                )
+            )
             judge_masses = list(capture.masses) if capture is not None else []
             entry: Dict[str, object] = {
                 "validation": validation,
@@ -428,14 +463,20 @@ class ZydahVerifier:
                 entry["judge_masses"] = judge_masses
                 if capture is not None and capture.outcomes:
                     # Identity from per-judge outcomes: surviving masses
-                    # keep their own judge name/model/session even when
-                    # another judge failed (no positional guessing).
+                    # keep their own judge name/model/session/alpha even
+                    # when another judge failed (no positional guessing).
                     entry["judges"] = [
                         {
                             "name": outcome.get("name"),
                             "model": outcome.get("model"),
                             "session_id": outcome.get("session_id"),
+                            "alpha": outcome.get("alpha"),
                         }
+                        for outcome in capture.outcomes
+                        if outcome.get("mass") is not None
+                    ]
+                    entry["judge_raw_masses"] = [
+                        outcome.get("raw_mass")
                         for outcome in capture.outcomes
                         if outcome.get("mass") is not None
                     ]
@@ -464,6 +505,13 @@ class ZydahVerifier:
                             "session_id": sessions[i]
                             if i < len(sessions)
                             else None,
+                            "alpha": getattr(
+                                judges_attr[i]
+                                if i < len(judges_attr)
+                                else None,
+                                "alpha",
+                                None,
+                            ),
                         }
                         for i in range(len(judge_masses))
                     ]
@@ -828,6 +876,50 @@ class ZydahVerifier:
                 re.search(pattern, lowered) for pattern in negation_patterns
             )
 
+        def spelled_mention(node: object, clause: str) -> bool:
+            state_name = str(
+                node.features.get("state_name", "")  # type: ignore[attr-defined]
+            ).lower()
+            lowered = clause.lower()
+            return bool(
+                (state_name and state_name in lowered)
+                or node.label.lower() in lowered  # type: ignore[attr-defined]
+            )
+
+        def clause_supports(node: object, clause: str) -> bool:
+            return bool(
+                mentions(node, clause)
+                and not is_negative(clause)
+                and not is_negated(clause)
+                and (is_affirmative(clause) or spelled_mention(node, clause))
+            )
+
+        def supporting_clauses(node: object, body: str) -> List[str]:
+            """Clauses in ``body`` that support ``node``.
+
+            One rule for sectioned and free-form answers alike: a
+            clause supports a candidate only when it mentions the
+            candidate, is neither marker-negative nor negated, and
+            carries an affirmative marker or a spelled mention. A
+            whole-body mention is never enough — every section names
+            its own state, and negative phrasings like "No specific
+            regional relationship" contain the affirmative substring
+            "regional relationship" while matching no negative
+            marker; only the clause veto keeps them out.
+            """
+            # Split on sentence terminators but not '?': a quoted
+            # clue like 'north, perhaps?' must stay inside its clause
+            # so a trailing hedge ("does not specifically identify")
+            # still vetoes the fragment before it.
+            clauses = [
+                clause
+                for clause in re.split(r"[.!;\n]+", body)
+                if clause.strip()
+            ]
+            return [
+                clause for clause in clauses if clause_supports(node, clause)
+            ]
+
         original = ""
         if followup.context is not None:
             original = followup.context.question or ""
@@ -868,20 +960,21 @@ class ZydahVerifier:
                 opens_negative = re.match(
                     r"[^a-z]*none\b", body.strip().lower()
                 )
-                if (
-                    opens_negative
-                    or is_negative(body)
-                    or not (is_affirmative(body) or mentions(node, body))
-                ):
+                if opens_negative or is_negative(body):
+                    continue
+                matched = supporting_clauses(node, body)
+                if not matched:
                     continue
                 support.append(node.id)
                 labels[node.id] = node.label
-                sections[node.id] = body.strip()
+                sections[node.id] = " ".join(
+                    clause.strip() for clause in matched
+                )
         else:
             # Free-form answer: judge each clause separately.
             clauses = [
                 clause
-                for clause in re.split(r"[.!?;\n]+", text)
+                for clause in re.split(r"[.!;\n]+", text)
                 if clause.strip()
             ]
             # A clause naming several candidates is an enumeration of
@@ -892,24 +985,10 @@ class ZydahVerifier:
                 if sum(mentions(node, clause) for node in nodes) <= 1
             ]
             for node in nodes:
-                state_name = str(
-                    node.features.get("state_name", "")
-                ).lower()
-
-                def spelled_mention(clause: str) -> bool:
-                    lowered = clause.lower()
-                    return bool(
-                        (state_name and state_name in lowered)
-                        or node.label.lower() in lowered
-                    )
-
                 matched_clauses = [
                     clause
                     for clause in evidence_clauses
-                    if mentions(node, clause)
-                    and not is_negative(clause)
-                    and not is_negated(clause)
-                    and (is_affirmative(clause) or spelled_mention(clause))
+                    if clause_supports(node, clause)
                 ]
                 if matched_clauses:
                     support.append(node.id)
@@ -1272,7 +1351,31 @@ class ZydahVerifier:
             }
             validation = self.validate(zydah_verdict)
             history.append({"validation": validation, "zydah": zydah_verdict, "mass": mass})
+
+            def _traj(action: str) -> None:
+                self._log(
+                    trajectory_row(
+                        episode_id=self._run_id,
+                        step=followups,
+                        state={
+                            "width": zydah_verdict.get("width"),
+                            "conflict": zydah_verdict.get("conflict"),
+                            "bel": zydah_verdict.get("bel"),
+                            "pl": zydah_verdict.get("pl"),
+                            "best": zydah_verdict.get("best"),
+                            "decision": zydah_verdict.get("decision"),
+                            "followups_left": max_iterations - followups,
+                            "graph_unresolved": False,
+                        },
+                        action=action,
+                        policy="pi_0",
+                        model_id=self.model_id,
+                        usage=_usage(),
+                    )
+                )
+
             if validation["verdict"] is not False:
+                _traj(ACTION_COMMIT)
                 independence = self._independence(first_session, followups)
                 self._log({"event": "verify_direct", "verdict": validation["verdict"], "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict"), "usage": _usage()})
                 return {
@@ -1292,6 +1395,7 @@ class ZydahVerifier:
             history[-1]["prompt"] = prompt
             history[-1]["followup"] = followup
             if self.responder is None or followups >= max_iterations:
+                _traj(ACTION_ASK_HUMAN)
                 independence = self._independence(first_session, followups)
                 self._log({"event": "verify_direct", "verdict": False, "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict"), "usage": _usage()})
                 return {
@@ -1310,6 +1414,7 @@ class ZydahVerifier:
                 }
             answer = self.responder(prompt, self.model_id)
             if not answer or not str(answer).strip():
+                _traj(ACTION_ASK_HUMAN)
                 independence = self._independence(first_session, followups)
                 self._log({"event": "verify_direct", "verdict": False, "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict"), "usage": _usage()})
                 return {
@@ -1334,6 +1439,7 @@ class ZydahVerifier:
             resolution, graph = self._resolve_with_graph(view_text)
             if resolution is not None and resolution.status == "unresolved":
                 history[-1]["route"] = "agent_unresolved"
+                _traj(ACTION_ASK_HUMAN)
                 independence = self._independence(first_session, followups)
                 self._log({"event": "verify_direct", "verdict": False, "needs_human": True, "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict"), "usage": _usage()})
                 return {
@@ -1356,6 +1462,7 @@ class ZydahVerifier:
                 }
             if self._is_human_question(answer):
                 history[-1]["route"] = "human"
+                _traj(ACTION_ASK_HUMAN)
                 independence = self._independence(first_session, followups)
                 self._log({"event": "verify_direct", "verdict": False, "needs_human": True, "followups": followups, "independence": independence, "sessions": ledger.session_ids(), "verifier_session": self.session_id, "width": zydah_verdict.get("width"), "conflict": zydah_verdict.get("conflict"), "usage": _usage()})
                 return {
@@ -1396,4 +1503,5 @@ class ZydahVerifier:
                         turn=followups + 1,
                     )
                 )
+            _traj(ACTION_MODEL_FOLLOWUP)
             followups += 1

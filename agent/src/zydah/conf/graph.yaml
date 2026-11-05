@@ -38,6 +38,15 @@ resolver:
   faster_margin_scale: 100.0
   resolved_threshold: 0.5
   conditioning_alpha: 0.75
+  # Human assertions are taken at full reliability by design
+  # (human_choice_alpha = 1.0): in this human-in-the-loop evaluator
+  # the operator is the authority, and discounting them would assert
+  # the system knows better than the person using it. Under Yager, a
+  # single human source against a vacuous prior carries no
+  # Zadeh-style paradox risk — conflict goes to Omega, and with one
+  # conditioning source there is no second source to conflict with.
+  # The exposure is mis-parse, not fusion; marker hardening and tests
+  # address parsing, not the operator's reliability.
   human_choice_alpha: 1.0
 
 calibration:

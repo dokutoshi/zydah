@@ -28,13 +28,14 @@ from zydah.fusion import (
     conjunctive_combine,
     conflict_mass,
     dempster_combine,
+    discount_mass,
     pignistic,
 )
 from zydah.fusion import yager_combine as _yager_combine
 from zydah.router import TAU_GENERAL, decide_best
 
 ESCALATE = "escalate"
-METHODS = ("majority_vote", "average", "dempster", "zydah")
+METHODS = ("majority_vote", "average", "dempster", "zydah", "zydah_discounted")
 
 
 def _argmax_label(scores: Mapping[str, float]) -> str:
@@ -142,8 +143,48 @@ def accuracy(
     }
 
 
-def run_manifest(seed: int, tau: float, frame: FrozenSet[str], rule: str = "yager") -> Dict:
-    return {"seed": seed, "tau": tau, "frame": sorted(frame), "rule": rule, "methods": list(METHODS)}
+def _discount_masses(
+    masses: Sequence[Mass],
+    frame: FrozenSet[str],
+    discount_alpha: float | Sequence[float],
+) -> List[Mass]:
+    """Apply Shafer discounting with one alpha or per-judge alphas."""
+    if isinstance(discount_alpha, Sequence) and not isinstance(
+        discount_alpha, (str, bytes)
+    ):
+        alphas = [float(alpha) for alpha in discount_alpha]
+        if len(alphas) != len(masses):
+            raise ValueError(
+                "discount_alpha sequence must match the number of judge masses"
+            )
+    else:
+        alphas = [float(discount_alpha)] * len(masses)
+    return [
+        discount_mass(mass, frame, alpha) for mass, alpha in zip(masses, alphas)
+    ]
+
+
+def run_manifest(
+    seed: int,
+    tau: float,
+    frame: FrozenSet[str],
+    rule: str = "yager",
+    discount_alpha: float | Sequence[float] = 1.0,
+) -> Dict:
+    alpha_value = (
+        [float(alpha) for alpha in discount_alpha]
+        if isinstance(discount_alpha, Sequence)
+        and not isinstance(discount_alpha, (str, bytes))
+        else float(discount_alpha)
+    )
+    return {
+        "seed": seed,
+        "tau": tau,
+        "frame": sorted(frame),
+        "rule": rule,
+        "discount_alpha": alpha_value,
+        "methods": list(METHODS),
+    }
 
 
 def log_jsonl(path: str, record: Mapping) -> None:
@@ -167,11 +208,14 @@ def compare(
     tau: float = TAU_GENERAL,
     seed: int = 0,
     rule: str = "yager",
+    discount_alpha: float | Sequence[float] = 1.0,
 ) -> Dict:
     """Run all methods over items with per-run judge masses.
 
     Each item: {"id": str, "reference": str, "runs": [[Mass, ...], ...]}.
     Run 0 feeds accuracy; all runs feed flip rate between consecutive runs.
+    ``zydah_discounted`` applies Shafer discounting before the Zydah
+    verdict; ``discount_alpha`` may be one alpha or per-judge alphas.
     """
     frame = frozenset(frame)
     references = [item["reference"] for item in items]
@@ -195,13 +239,28 @@ def compare(
             item_out["zydah"].append(
                 zy["verdict"] if zy["decision"] == "commit" else ESCALATE
             )
+            discounted = _discount_masses(masses, frame, discount_alpha)
+            zy_discounted = zydah_verdict(
+                discounted, frame, tau=tau, rule=rule
+            )
+            item_out["zydah_discounted"].append(
+                zy_discounted["verdict"]
+                if zy_discounted["decision"] == "commit"
+                else ESCALATE
+            )
         for method in METHODS:
             outputs[method].append(item_out[method])
         records.append({"id": item["id"], "reference": item["reference"], **{m: item_out[m] for m in METHODS}})
     metrics = {}
     for method in METHODS:
         run0 = [per_item[0] for per_item in outputs[method]]
-        acc = accuracy(run0, references, abstain=None if method != "zydah" else ESCALATE)
+        acc = accuracy(
+            run0,
+            references,
+            abstain=None
+            if method not in ("zydah", "zydah_discounted")
+            else ESCALATE,
+        )
         flips = []
         n_runs = len(items[0]["runs"]) if items else 0
         for r in range(1, n_runs):
@@ -215,4 +274,8 @@ def compare(
             **acc,
             "flip_rate": (sum(flips) / len(flips)) if flips else 0.0,
         }
-    return {"manifest": run_manifest(seed, tau, frame, rule), "metrics": metrics, "items": records}
+    return {
+        "manifest": run_manifest(seed, tau, frame, rule, discount_alpha),
+        "metrics": metrics,
+        "items": records,
+    }

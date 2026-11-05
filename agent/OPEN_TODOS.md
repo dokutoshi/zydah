@@ -31,39 +31,6 @@ Sync contract (for the future script, not yet built):
 - Acceptance: round-trip creates each open item once, updates edits, and
   closes issues moved to `CLOSED_TODOS.md`, without duplicating keys.
 
-## ZYDAH-003 — Decide per-judge discount source and wire alpha
-
-- Status: open
-- Priority: medium
-- Area: fusion / judges
-- Source: derivation doc §11 follow-up (deferred in plan)
-- Jira: ZYDAH-2
-- Updated: 2026-11-03
-- Details: `discount_mass` exists in `src/zydah/fusion.py` and is now called
-  by `graph_resolver.condition` (resolver-side `conditioning_alpha` from
-  `conf/graph.yaml`). Still open is the per-judge question: the doc says
-  a robust system does both (discount before, keep conflict after), but
-  where each judge's `alpha` comes from is a product decision: fixed
-  per-judge reliability, calibrated from data, or judge-reported.
-  Decide, then wire the chosen source at the judge call site.
-- Acceptance: documented per-judge alpha policy; discount applied at the
-  judge call site; tests cover the wiring.
-
-## ZYDAH-004 — Decide whether router consumes K / interval width directly
-
-- Status: open
-- Priority: medium
-- Area: router
-- Source: README thesis vs `src/zydah/router.py`
-- Jira: ZYDAH-3
-- Updated: 2026-11-02
-- Details: README says "escalate on evidence (high conflict mass / wide
-  [Bel, Pl] interval)". `decide_best`/`decide_hypothesis` decide on the
-  `[Bel, Pl]` straddle only; `eval/harness.py` records `conflict` but the
-  router never sees it. Decide if `tau`-straddle is sufficient or if K /
-  width thresholds belong in the decision, then implement or record why not.
-- Acceptance: decision recorded; router and README agree; tests updated.
-
 ## ZYDAH-006 — Verify Baseten Spark Open path
 
 - Status: open
@@ -76,32 +43,6 @@ Sync contract (for the future script, not yet built):
   Confirm model ID, auth via `BASETEN_API_KEY`, and response parsing
   against one real call or recorded fixture.
 - Acceptance: verified call or fixture; failures documented.
-
-## ZYDAH-007 — Document discounting in README math section
-
-- Status: open
-- Priority: low
-- Area: docs
-- Source: `discount_mass` added; README still lists only Dempster / Yager / TBM
-- Jira: ZYDAH-5
-- Updated: 2026-11-02
-- Details: add Shafer (1976) reliability discounting to the README "Math"
-  section and the `src/zydah/fusion.py` layout line so docs match code.
-- Acceptance: README names all four published methods with one-line roles.
-
-## ZYDAH-008 — Add discounted-Zydah arm to harness comparison
-
-- Status: open
-- Priority: low
-- Area: eval
-- Source: derivation doc §11 "robust system does both"; `eval/harness.py`
-- Jira: ZYDAH-6
-- Updated: 2026-11-02
-- Details: harness compares majority vote / average / Dempster / Zydah
-  but has no discounted-fusion arm. Depends on ZYDAH-003's alpha policy.
-  Add the arm and record how discounting shifts accuracy, coverage, and
-  flip rate on the seeded mock panel.
-- Acceptance: `compare()` includes the arm; metrics documented; tests updated.
 
 ## ZYDAH-009 — Open-world verifier mode via web fetch
 
@@ -227,6 +168,7 @@ Sync contract (for the future script, not yet built):
 ## ZYDAH-013 — Optimizer: bitmask focal sets + NumPy combination in fusion core
 
 - Status: open
+- Jira: ZYDAH-32
 - Priority: low
 - Area: fusion / performance
 - Source: user optimizer note, 2026-11-04

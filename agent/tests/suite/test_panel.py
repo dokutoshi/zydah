@@ -43,12 +43,65 @@ def test_panel_config_defaults_to_spark_and_low_effort():
     cfg = load_panel_config()
     assert cfg.quorum == 2
     assert cfg.effort == "low"
+    assert cfg.alpha == 1.0
     assert len(cfg.judges) == 3
     # A judge entry without an explicit model defaults to Spark.
     from zydah.judges import PanelJudge
 
     assert PanelJudge(name="x").model == "muse-spark"
     assert PanelJudge(name="x").effort is None
+    assert PanelJudge(name="x").alpha is None
+
+
+def test_panel_config_rejects_alpha_outside_unit_interval(tmp_path):
+    from pydantic import ValidationError
+
+    bad = tmp_path / "panel.yaml"
+    bad.write_text(
+        "quorum: 2\neffort: low\nalpha: 1.2\njudges:\n  - name: x\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        load_panel_config(bad)
+
+
+def test_live_panel_discounts_each_judge_mass_before_return():
+    panel = LivePanel(
+        FRAME,
+        judges=[
+            OkJudge("a", alpha=0.5),
+            OkJudge("b", alpha=1.0),
+            OkJudge("c", alpha=0.0),
+        ],
+        quorum=2,
+        session_ids=["s-1", "s-2", "s-3"],
+    )
+
+    masses = panel.elicit(item_id="evidence", run=0)
+
+    assert masses[0] == make_mass(FRAME, {"pass": 0.4, FRAME: 0.6})
+    assert masses[1] == a_mass()
+    assert masses[2] == make_mass(FRAME, {FRAME: 1.0})
+    assert panel.last_outcomes[0]["raw_mass"] == a_mass()
+    assert panel.last_outcomes[0]["mass"] == masses[0]
+    assert panel.last_outcomes[0]["alpha"] == 0.5
+
+
+def test_from_config_resolves_per_judge_alpha_over_global():
+    from zydah.judges import PanelConfig, PanelJudge
+
+    cfg = PanelConfig(
+        quorum=2,
+        effort="low",
+        alpha=0.5,
+        judges=[
+            PanelJudge(name="wonder", model="muse-wonder"),
+            PanelJudge(name="spark", model="muse-spark", alpha=0.25),
+        ],
+    )
+    panel = LivePanel.from_config(cfg, FRAME)
+
+    assert [j.alpha for j in panel.judges] == [0.5, 0.25]
 
 
 def test_panel_config_requires_judges_in_yaml(tmp_path):
@@ -125,6 +178,35 @@ def test_failed_middle_judge_keeps_survivor_identity():
     assert panel.last_outcomes[1]["name"] == "spark"
     assert panel.last_outcomes[1]["mass"] is None
     assert panel.last_outcomes[1]["error"]
+
+
+def test_failed_middle_judge_keeps_survivor_alpha_and_raw_mass():
+    from zydah.verifier import ZydahVerifier
+
+    panel = LivePanel(
+        FRAME,
+        judges=[
+            MetaApiJudge("muse-wonder", name="wonder", alpha=0.5),
+            MetaApiJudge("muse-spark", name="spark", alpha=0.25),
+            MetaApiJudge("muse-spark-open", name="spark-open", alpha=0.75),
+        ],
+        quorum=2,
+        session_ids=["sess-1", "sess-2", "sess-3"],
+    )
+    panel.judges[0].judge = lambda evidence, frame: a_mass()  # type: ignore[method-assign]
+    panel.judges[1].judge = BadJudge("muse-spark").judge  # type: ignore[method-assign]
+    panel.judges[2].judge = lambda evidence, frame: a_mass()  # type: ignore[method-assign]
+
+    verifier = ZydahVerifier(FRAME, panel=panel)
+    out = verifier.verify("claim")
+    entry = out["history"][0]
+
+    assert [j["name"] for j in entry["judges"]] == ["wonder", "spark-open"]
+    assert [j["alpha"] for j in entry["judges"]] == [0.5, 0.75]
+    assert entry["judge_raw_masses"] == [a_mass(), a_mass()]
+    assert entry["judge_masses"][0] == make_mass(
+        FRAME, {"pass": 0.4, FRAME: 0.6}
+    )
 
 
 def test_live_panel_below_quorum_raises():

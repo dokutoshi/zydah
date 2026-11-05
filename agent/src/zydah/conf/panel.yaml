@@ -3,6 +3,10 @@
 quorum: 2
 # Default reasoning effort for judges (pydantic default: low).
 effort: low
+# Shafer reliability discounting: each judge mass is scaled by alpha
+# before fusion, with the remainder moved to Omega. 1.0 is unchanged.
+# A judge entry may set its own alpha to override this panel value.
+alpha: 1.0
 judges:
   - name: wonder
     model: muse-wonder

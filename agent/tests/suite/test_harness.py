@@ -94,14 +94,43 @@ def test_compare_is_deterministic_and_covers_all_methods():
     out1 = compare(items, FRAME, tau=0.80, seed=42)
     out2 = compare(items, FRAME, tau=0.80, seed=42)
     assert out1 == out2
-    assert set(out1["metrics"]) == {"majority_vote", "average", "dempster", "zydah"}
+    assert set(out1["metrics"]) == {
+        "majority_vote",
+        "average",
+        "dempster",
+        "zydah",
+        "zydah_discounted",
+    }
     assert out1["manifest"] == {
         "seed": 42,
         "tau": 0.80,
         "frame": ["fail", "partial", "pass"],
         "rule": "yager",
-        "methods": ["majority_vote", "average", "dempster", "zydah"],
+        "discount_alpha": 1.0,
+        "methods": [
+            "majority_vote",
+            "average",
+            "dempster",
+            "zydah",
+            "zydah_discounted",
+        ],
     }
     for metrics in out1["metrics"].values():
         assert 0.0 <= metrics["flip_rate"] <= 1.0
         assert 0.0 <= metrics["coverage"] <= 1.0
+
+
+def test_compare_discounted_arm_moves_mass_to_omega_and_escalates():
+    masses = [
+        make_mass(FRAME, {"pass": 0.85, OMEGA: 0.15}),
+        make_mass(FRAME, {"pass": 0.85, OMEGA: 0.15}),
+    ]
+    items = [{"id": "agree", "reference": "pass", "runs": [masses]}]
+
+    out = compare(items, FRAME, tau=0.80, seed=1, discount_alpha=0.5)
+
+    assert out["manifest"]["discount_alpha"] == 0.5
+    assert out["metrics"]["zydah"]["coverage"] == 1.0
+    assert out["metrics"]["zydah_discounted"]["coverage"] == 0.0
+    assert out["items"][0]["zydah"] == ["pass"]
+    assert out["items"][0]["zydah_discounted"] == ["escalate"]
