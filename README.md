@@ -65,10 +65,16 @@ P.S. Two doctors, one patient... Dempster says tumor. 🙂
 
 ## Quickstart
 
+Requires [uv](https://docs.astral.sh/uv/) (`brew install uv`). uv manages the
+virtualenv and provisions the pinned Python 3.12 from `.python-version` — do
+not use `pip` or `python -m venv`.
+
 ```sh
 cd agent
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
+uv sync --extra dev
+uv run pytest
 ```
+
+The test suite runs fully offline: no API keys, no network, no model calls.
+The live demo needs model credentials in `agent/.env` — see
+[`agent/README.md`](agent/README.md) for the demo flags and panel options.

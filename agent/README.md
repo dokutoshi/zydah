@@ -142,6 +142,10 @@ uv sync --extra dev
 uv run pytest
 ```
 
+The test suite runs fully offline: no API keys, no network, no model calls.
+The live demo needs model credentials in `.env` — see “Live demo” below for
+the demo flags and panel options.
+
 ## Live demo (interactive)
 
 The demo talks to the configured live model (`.env` at the repo root),

@@ -769,6 +769,34 @@ def test_human_text_negation_veto_beats_similarity():
     assert out["support"] == ["Springfield, IL"]
 
 
+def test_human_text_exclusion_phrase_vetoes_candidate():
+    # Recorded gap, now hardened in config: "anywhere but
+    # Massachusetts" must not condition Springfield, MA. Before the
+    # multi-word exclusion markers landed, this mis-parsed as an
+    # affirmative Massachusetts mention (support == [Springfield, MA]).
+    sent = []
+    verifier = _graph_verifier(sent)
+    out = verifier.condition_on_human_text(
+        "anywhere but Massachusetts",
+        question="What is the weather in Springfield today?",
+    )
+    assert out is None
+    assert sent == []
+
+
+def test_human_text_benign_but_still_conditions():
+    # Bare "but" is deliberately not a negation marker: benign
+    # contrast must not veto an affirmative mention.
+    sent = []
+    verifier = _graph_verifier(sent)
+    out = verifier.condition_on_human_text(
+        "It's the Massachusetts one, but I could be wrong",
+        question="What is the weather in Springfield today?",
+    )
+    assert out is not None
+    assert out["support"] == ["Springfield, MA"]
+
+
 def test_human_text_without_support_conditions_nothing():
     sent = []
     verifier = _graph_verifier(sent, responder=lambda prompt: "No relationship.")

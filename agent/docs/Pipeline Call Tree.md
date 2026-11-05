@@ -2,23 +2,28 @@
 
 For review. Status column is literal: **Active** = runs in the live
 demo today; **Inactive** = implemented and tested, not on the demo
-path; **Not built** = planned only.
+path; **Not built** = planned only; **Research** = future direction,
+implemented offline only and not wired into routing.
+
+Mathematical notation follows [Zadeh's Paradox, Yager, and Smets: A Derivation from First Principles](<Zadeh's Paradox, Yager, and Smets A Derivation from First Principles.md>): mass $m$, ignorance $m(\Omega)$, conflict $K$, reliability $\alpha$, and the credal interval $[Bel, Pl]$.
 
 ## Components
 
 | Component | What it is | Status |
 |---|---|---|
-| LLM transport | OpenAI-compatible `chat_complete` (`src/zydah/transport.py`); endpoint/key/model from env, `MODEL_API_*` | Active |
+| LLM transport | OpenAI-compatible `chat_complete` (`src/zydah/transport.py`); endpoint/key from env; `MODEL_API_MODEL`, when set, is the parent endpoint model and wins on the wire over any caller-supplied model | Active |
 | First response (`[muse]`) | One live model call per question, sealed via `capture_first_response` before any verifier output exists | Active |
-| Judge panel | 3 judges — Muse Wonder, Muse Spark, Muse Spark Open (`PANEL` in `src/zydah/judges.py`), one mass each, fused by Yager | **Inactive on non-panel path** |
+| Judge panel | 3 judges — Muse Wonder, Muse Spark, Muse Spark Open (`PANEL` in `src/zydah/judges.py`), one mass each, Shafer-discounted by $\alpha$ before Yager fusion | **Inactive on non-panel path** |
 | Panel path (`verify` / `fuse_response`) | Panel masses -> `fused_verdict` [Bel, Pl] -> validator -> follow-up loop | Inactive (tests only) |
 | Non-panel path (`verify_direct`) | Panel bypassed: the model scores the evidence itself, one mass per turn via `make_mass_elicitor` -> `chat_complete`. The demo driver (`tools/live_demo.py`) runs this path | **Active** |
-| Validator | Width and conflict vs 0.35 thresholds from `conf/verifier.yaml`; `verdict=good` or structured follow-up | Active |
-| Graph resolver | `NumpyResolver` over `CandidateGraph` (Springfield places, comparisons); partitions, Yager conditioning on support at source-dependent alpha (human 1.0, model 0.75) | **Active** (Springfield questions) |
-| Learned GNN scorer | PyTorch Geometric model to replace/augment `NumpyResolver` scoring (ZYDAH-116/117); MPS verified on the Neo | **Not built** |
+| Validator | Width and conflict $K$ vs 0.35 thresholds from `conf/verifier.yaml`; `verdict=good` or structured follow-up | Active |
+| Router | `decide_interval(Bel, Pl, tau)`: commit if $Bel \ge \tau$, reject if $Pl < \tau$, escalate when $[Bel, Pl]$ straddles $\tau$. $K$ and width are validator inputs, not router inputs (ZYDAH-004) | Active |
+| Graph resolver | `NumpyResolver` over `CandidateGraph` (Springfield places, comparisons); partitions, Yager conditioning on support at source-dependent reliability $\alpha$ (human $1.0$, model $0.75$); entered from structured choices and from free-text clues via `condition_on_human_text` | **Active** (Springfield questions) |
+| Learned GNN scorer | PyTorch Geometric model to replace/augment `NumpyResolver` scoring (ZYDAH-116/117); PyG forward pass verified on CPU, MPS unverified (reported unavailable in the sandbox probe) | **Not built** |
 | MiniLM encoder | `sentence-transformers/all-MiniLM-L6-v2` cross-check: a literally-parsed relationship support survives only if the candidate's summary scores >= `similarity_threshold` (0.25) against its descriptor | Active (when graph wired) |
-| Human (`[human]`) | Terminal multiple choice (direction partitions + `Other`), Pydantic `ChoiceKey`; answers recorded as RLHF `human_feedback` | Active |
+| Human (`[human]`) | Terminal multiple choice (direction partitions + `Other`) plus free-form `[you: answer]` / gate text that conditions the graph via `condition_on_human_text`; structured answers recorded as RLHF `human_feedback` | Active |
 | Belief frame JSON | Per turn: `{"frame": [...], "mass": {focal: w, "Omega": w}}`; per candidate: `(A, ~A, Omega)` tuples. Pignistic is derived, never stored as the value | Active |
+| Temporal-difference routing | Offline TD(0)/Monte-Carlo learner over logged verifier trajectories (`src/zydah/td.py`); see Further RL Research | **Research** (not wired) |
 
 ## Call tree (live demo)
 
@@ -30,7 +35,10 @@ tools/live_demo.py main()
 |   |-- [muse] <response>
 |   |-- if response asks a question (_asks_human):
 |   |     [you: answer] <human text>             # e.g. "the celtics are a great team"
-|   |     chat_complete(clarification + answer)  # LLM call 2: substantive response
+|   |     _condition_on_text(answer) -> condition_on_human_text(answer, question)
+|   |       -> _relationship_conditioning(answer, human $\alpha=1.0$) -> resolve()+condition()
+|   |       (fallback only if no support: model answer conditioned at $\alpha=0.75$)
+|   |     chat_complete(clarification + answer + conditioning)  # LLM call 2: substantive response
 |   |     [muse] <response>                      # loop while it keeps asking
 |   |-- capture_first_response(...)              # sealed [muse], separate session
 |   |-- build_verifier(...)                      # Springfield -> NumpyResolver + place graph
@@ -54,7 +62,8 @@ tools/live_demo.py main()
 |           |-- _relationship_conditioning(answer):
 |           |     literal per-candidate parse (negation, enumerations, headings)
 |           |     MiniLM similarities(summary, descriptor) >= 0.25 ?
-|           |     Yager condition on support (alpha 0.75, model source)
+|           |     Yager condition on support (model $\alpha=0.75$)
+|           |     (structured choice itself conditioned pre-model at human $\alpha=1.0$)
 |           |     -> belief_frame + (A, ~A, Omega) per candidate
 |           |-- model question? -> next candidate choice round (subset shrinks)
 |           '-- re-elicit -> validate -> good / next follow-up / pause
@@ -76,6 +85,9 @@ tools/live_demo.py main()
 [human]    the model asked you a question; answer it here.
 [you]      the celtics are a great team
    |
+   |  _condition_on_text: polarity parse -> MiniLM >= 0.25 -> Yager condition
+   |  (human $\alpha=1.0$) -> conditioning text into evidence + followup prompt
+   |  (model fallback at $\alpha=0.75$ only if the human clue yields no support)
    v
 [muse]     (model continues with the human answer in context)
            "Since the Celtics are Boston's team, Springfield, MA ..."
@@ -126,8 +138,11 @@ are why the demo runs the non-panel path by default. The panel contract
   Each judge is elicited in a separate stateless call and receives
   the evidence without another judge's mass or prose. That call
   structure creates the silo; the session id names and audits it.
-- Each judge sends its own configured model (the env-collapse that
-  silently merged all judges into one model is fixed).
+- Each judge is configured with its own model, but `MODEL_API_MODEL`
+  remains the transport-level parent model: when set, it wins on the
+  wire over every judge's configured model. Judge labels/sessions can
+  therefore differ from the deployed model actually sent; check
+  `chat_complete model=...` in `trace.log`.
 - Shafer discounting: each raw judge mass is discounted by its
   configured alpha before Yager fusion. Raw masses and alphas are
   retained in panel outcomes and `panel_json` for audit.
@@ -245,7 +260,7 @@ answer next**:
    summary, blocking assumptions. The model's answer returns as a
    `MODEL_FOLLOWUP` ledger chunk (with the verifier's session id) and
    the loop re-elicits. Repeat until width <= 0.35 or
-   `max_iterations` (5) is exhausted.
+   `max_iterations` (7 in `verifier.yaml`) is exhausted.
 4. **Graph steering.** After a follow-up answer, `NumpyResolver`
    runs before any routing: a resolved graph appends a labeled
    `GRAPH_RESOLUTION` chunk ("Graph resolution (...): best_partition=
@@ -253,7 +268,10 @@ answer next**:
    elicitation literally reads the deduction. An unresolved graph
    instead stops the loop and generates the `[human]` multiple-choice
    question from its partitions.
-5. **Human steering.** A human key press becomes a `HumanFollowup`
+5. **Human steering.** For free text, the human's own clue is parsed
+   first (polarity gate, MiniLM cross-check, Yager condition at human
+   $\alpha=1.0$; a state mention can condition with no model call at all).
+   A human key press becomes a `HumanFollowup`
    JSON sent to the model: the choice value plus expanded graph
    context (candidates, `(A, ~A, Omega)` beliefs, relationship
    questions, original question). For an `Other` clue, the model's
@@ -279,10 +297,13 @@ Its **text** is; its structure is not.
   of chunk texts joined by `additional_info_prefix`
   (`"\n\nAdditional information:\n"`). The model sees the words, and
   returns one JSON mass.
-- The responder never sees the ledger. It receives exactly two kinds
-  of message, both JSON: the validator's follow-up
-  (`serialize_followup`) and, after a human choice, the
-  `HumanFollowup` (choice + expanded graph context).
+- The responder never sees the ledger. It receives three kinds of
+  message: the validator's follow-up (`serialize_followup`) JSON,
+  after a human choice the `HumanFollowup` JSON (choice + expanded
+  graph context), and in the live demo a plain-text follow-up prompt
+  via `_stream` carrying any graph-conditioning text. The
+  `condition_on_human_text` fallback can also send a `HumanFollowup`
+  JSON without a paused choice.
 - Chunk kinds, session ids, and provenance metadata stay inside the
   ledger. They drive independence classification (`CONTEXT_INDEPENDENT`
   / `ASSISTED` / `JOINT_CONTEXT`) and are never shown to the model —
@@ -290,10 +311,13 @@ Its **text** is; its structure is not.
 
 ## Human response routing: does it reach the graph resolver?
 
-Short answer: **not directly.** Human text is never fed to the
-resolver or scored by Zydah as-is. It routes to the model first;
-the resolver engages only through the structured-choice machinery
-around that model call.
+Short answer: **yes, in Springfield-gated runs — via conditioning,
+never via graph construction.** Human free text is parsed for
+candidate support and Yager-conditioned at human $\alpha=1.0$ before
+any model call; the graph itself is always rebuilt from the original
+question, never from human text. With no resolver injected
+(non-Springfield), human text conditions nothing and flows to the
+model/evidence only.
 
 ```
                         HUMAN RESPONSE
@@ -303,11 +327,18 @@ around that model call.
      free-form text                    structured choice
   ([you: answer] / gate)            (paused [you: choice key])
               |                               |
-        to the MODEL               GATE: paused result with
-      (continuation /              `choices` + key validates?
-       direction)                   (Other needs free text)
+ _condition_on_text ->             GATE: paused result with
+ condition_on_human_text           `choices` + key validates?
+ (text, question)                   (Other needs free text)
               |                          |           |
-           [muse]                       no          yes
+ polarity gate -> MiniLM >= 0.25        no          yes
+ -> resolve() + Yager condition
+   (human $\alpha=1.0$)
+              |
+ conditioning text -> evidence /
+ followup prompt -> [muse]
+ (fallback: model answer at
+  $\alpha=0.75$ if no support)
                                           |           |
                                      ValueError   +---+-------------+
                                      (fail closed)|                 |
@@ -343,20 +374,31 @@ around that model call.
 
 Two qualifications keep the diagram honest:
 
-- A partition/candidate **key selection does reach the resolver**:
-  `_choice_context` rebuilds the graph and conditions the chosen
-  members (human alpha) before the model is called. The human's
-  *text* still never goes to the resolver — the conditioned
-  `(A, ~A, Omega)` beliefs ride to the model inside the
-  `HumanFollowup` JSON, and Zydah scores the model's revised
-  answer, not the human's words.
+- A partition/candidate **key selection reaches the resolver as
+  support ids**, not text: `_choice_context` rebuilds the graph and
+  conditions the chosen members (human $\alpha$) before the model is
+  called, and the conditioned `(A, ~A, Omega)` beliefs ride to the
+  model inside the `HumanFollowup` JSON. **Free text is different**:
+  the human's own words are `_relationship_conditioning` input in
+  `condition_on_human_text` (human $\alpha$, before any model call);
+  only the fallback scores a model answer.
 - Precondition above all of it: a resolver exists only if one was
   injected. In the demo, `build_verifier` adds `NumpyResolver` +
   place graph + MiniLM only when "springfield" appears in the
-  question or first response. No graph configured, no right side.
+  question or first response. No graph configured, no conditioning
+  on either side — free-text or structured.
 
-For contrast, model answers face the graph on every flagged
-follow-up (deduction before routing, `src/zydah/verifier.py`):
+Panel-mode exception: the direct free-text conditioning above is in
+the non-panel `run_question` flow. On the `--zydah-panel` path the
+pause has no resume (`resume_panel` is not built in v1), so panel
+human input does not reach the resolver through
+`condition_on_human_text`. Whether live free-text conditioning should
+also be recorded as RLHF `human_feedback` — as structured
+`resume_direct` choices are — is not yet documented or tested; the
+live demo stores it as `graph_conditioning` / context lines.
+
+For contrast, model answers **and human free text** face the graph
+on flagged follow-ups (deduction before routing, `src/zydah/verifier.py`):
 even a question-shaped answer first runs `_resolve_with_graph`;
 unresolved generates the `[human]` multiple-choice question
 above, resolved appends a `GRAPH_RESOLUTION` evidence chunk and
@@ -409,6 +451,11 @@ regardless of order.
   the final verifier state, never a mid-turn blocker.
 - First-response session != verifier session, or the cycle is labeled
   `JOINT_CONTEXT`; follow-up-assisted cycles are labeled `ASSISTED`.
+- Human assertions are conditioned at $\alpha = 1.0$ by design
+  (operator authority); model-derived conditioning uses
+  $\alpha = 0.75$. A free-text-conditioned cycle is labeled
+  `ASSISTED`, never `CONTEXT_INDEPENDENT`: full reliability on the
+  assertion, honest assisted status on the cycle.
 - A scalar is never the stored value: belief frames and
   `(A, ~A, Omega)` tuples are; pignistic/Bel/Pl derive from them.
 - Every threshold, marker list, and model name lives in
