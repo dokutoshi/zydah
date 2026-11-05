@@ -756,6 +756,95 @@ def test_human_text_entity_clue_uses_model_relationship_answer():
     assert followup["context"]["relationship_questions"]["Springfield, MA"]
 
 
+def test_human_text_north_clue_conditions_only_northern_candidates():
+    # Trace-shaped failure: the model's per-candidate JSON sections
+    # all name their own state, and the negative sections phrase it
+    # as "No specific regional relationship" — which contains the
+    # affirmative substring "regional relationship" and matches no
+    # negative marker. Support must be the northern candidates the
+    # answer actually affirms (MA, OR), not all eight; conditioning
+    # on all eight is vacuous (A = 0.0, omega = 1.0 everywhere).
+    sent = []
+
+    def responder(prompt):
+        return json.dumps(
+            {
+                "Springfield, IL": (
+                    "No explicit city or state mention. Vague regional "
+                    "compatibility only: Illinois is in the Midwest / "
+                    "northern-central US, so 'north, perhaps?' is weakly "
+                    "compatible, but does not specifically identify "
+                    "Springfield, IL."
+                ),
+                "Springfield, MO": (
+                    "No explicit city or state mention. No specific "
+                    "regional relationship: Missouri is typically "
+                    "Midwest / central-south, not described as 'north'. "
+                    "The hint does not identify Springfield, MO."
+                ),
+                "Springfield, MA": (
+                    "No explicit city or state mention. Regional "
+                    "relationship: Massachusetts is in the Northeast / "
+                    "North. 'north, perhaps?' is compatible with this "
+                    "northern location, but does not specifically "
+                    "identify Springfield, MA."
+                ),
+                "Springfield, OH": (
+                    "No explicit city or state mention. Vague regional "
+                    "compatibility only: Ohio is in the Midwest / "
+                    "northern US, so 'north, perhaps?' is weakly "
+                    "compatible, but does not specifically identify "
+                    "Springfield, OH."
+                ),
+                "Springfield, OR": (
+                    "No explicit city or state mention. Regional "
+                    "relationship: Oregon is in the Pacific Northwest / "
+                    "North - the northernmost candidate. 'north, "
+                    "perhaps?' is compatible with this northern "
+                    "location, but does not specifically identify "
+                    "Springfield, OR."
+                ),
+                "Springfield, TN": (
+                    "No explicit city or state mention. No supporting "
+                    "regional relationship: Tennessee is in the South, "
+                    "which is inconsistent with 'north, perhaps?'. "
+                    "Does not identify Springfield, TN."
+                ),
+                "Springfield, GA": (
+                    "No explicit city or state mention. No supporting "
+                    "regional relationship: Georgia is in the Southeast "
+                    "/ Deep South, which is inconsistent with 'north, "
+                    "perhaps?'. Does not identify Springfield, GA."
+                ),
+                "Springfield, VA": (
+                    "No explicit city or state mention. No specific "
+                    "regional relationship: Virginia is Mid-Atlantic / "
+                    "South, not typically described as 'north' alone. "
+                    "The hint does not identify Springfield, VA."
+                ),
+            }
+        )
+
+    verifier = _graph_verifier(sent, responder=responder)
+    out = verifier.condition_on_human_text(
+        "well i am traveling there so you have to guess. north, perhaps?",
+        question="What is the weather in Springfield today?",
+    )
+    assert out is not None
+    assert out["support"] == ["Springfield, MA", "Springfield, OR"]
+    beliefs = out["candidate_beliefs"]
+    # Committed mass sits on the support pair {MA, OR}, so Bel of
+    # either singleton is 0 by construction; the discrimination is
+    # in the interval: members carry the conditioned plausibility
+    # (omega = Pl - Bel) while non-members are believed against.
+    assert beliefs["Springfield, MA"]["omega"] > 0.5
+    assert beliefs["Springfield, OR"]["omega"] > 0.5
+    assert beliefs["Springfield, GA"]["not_A"] > 0.5
+    assert beliefs["Springfield, GA"]["omega"] < 0.5
+    assert "resolved" in out["text"]
+    assert "unresolved" not in out["text"]
+
+
 def test_human_text_negation_veto_beats_similarity():
     sent = []
     verifier = _graph_verifier(
