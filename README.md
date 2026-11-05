@@ -18,6 +18,25 @@ trained state and the evidence supplied in the prompt. An open-world use of
 Smets' TBM would require external evidence access — internet/web fetch or
 another live source — which is not part of this demo.
 
+## Why Zydah exists — Zadeh's paradox
+
+Two strongly conflicting sources can break naive fusion. In the classic
+medical example, two doctors agree a patient has one of {meningitis,
+tumor, concussion} but assign near-opposite certainties; Dempster's rule
+normalizes the conflict away and returns near-certainty in the one
+hypothesis both doctors rated *least* likely. The failure is not the
+evidence — it is treating conflict mass $K$ as noise to divide out.
+
+Zydah takes the opposite position: $K$ and the [Bel, Pl] interval width
+are kept visible and used as routing signals. High conflict or a wide
+interval escalates to System 2 (or to a human) instead of being
+normalized into false confidence; Yager's rule sends $K$ to ignorance
+$\Omega$, and Smets' TBM leaves it on the empty set where it can be
+detected as frame failure.
+
+Full derivation, from first principles:
+[Zadeh's Paradox, Yager, and Smets](<agent/docs/Zadeh's Paradox, Yager, and Smets A Derivation from First Principles.md>).
+
 Dependability is tested with order-invariance checks, seed/flip variance,
 and seeded synthetic harness baselines. No always-LLM cost baseline exists
 yet.
@@ -46,6 +65,28 @@ P.S. Two doctors, one patient... Dempster says tumor. 🙂
 
 > **Provenance:** new work built during the event, Oct 27 – Nov 4, 2026.
 > Public repo; synthetic or public data only.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    Q([Question]) --> M[LLM response]
+    M --> S1{System 1: verifier}
+    S1 --> E[Elicitor: 1 judge<br/>or panel: 3 judges, separate sessions]
+    E --> F[Fusion: Shafer alpha discounting<br/>then Yager — Bel, Pl, width, conflict K]
+    F --> V{Wide interval<br/>or high K?}
+    V -- no --> R[Router vs tau:<br/>commit / escalate / reject]
+    R --> OUT([Verdict])
+    V -- yes: speculative --> S2[System 2: LLM follow-up<br/>answers the follow-up JSON]
+    S2 --> G[Graph resolver: candidate graph<br/>+ MiniLM similarity cross-check]
+    G -- resolved --> S1
+    G -- unresolved --> H[Human: partition choices<br/>East / North / South / West / Other<br/>or free-text clue]
+    H --> C[Condition candidate beliefs<br/>human alpha = 1.0, model alpha = 0.75]
+    C --> M
+```
+
+Full call tree, panel paths, and invariants:
+[agent/docs/Pipeline Call Tree.md](<agent/docs/Pipeline Call Tree.md>).
 
 ## Thesis
 
