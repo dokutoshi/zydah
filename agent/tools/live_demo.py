@@ -617,8 +617,17 @@ def build_verifier(
     if "springfield" in combined:
         graph_resolver = NumpyResolver()
         graph_factory = lambda evidence: build_place_graph()
+
+        def _announce_scorer_load() -> None:
+            emit(
+                "[zydah] loading MiniLM similarity encoder "
+                f"({cfg.similarity_model}) — first run downloads "
+                "~90 MB from Hugging Face, then offline."
+            )
+
         similarity_scorer = SentenceTransformerScorer(
-            str(cfg.similarity_model)
+            str(cfg.similarity_model),
+            on_first_load=_announce_scorer_load,
         )
     base_elicitor = make_mass_elicitor(
         str(cfg.direct_mass_prompt_template)
