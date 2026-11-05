@@ -876,6 +876,50 @@ class ZydahVerifier:
                 re.search(pattern, lowered) for pattern in negation_patterns
             )
 
+        def spelled_mention(node: object, clause: str) -> bool:
+            state_name = str(
+                node.features.get("state_name", "")  # type: ignore[attr-defined]
+            ).lower()
+            lowered = clause.lower()
+            return bool(
+                (state_name and state_name in lowered)
+                or node.label.lower() in lowered  # type: ignore[attr-defined]
+            )
+
+        def clause_supports(node: object, clause: str) -> bool:
+            return bool(
+                mentions(node, clause)
+                and not is_negative(clause)
+                and not is_negated(clause)
+                and (is_affirmative(clause) or spelled_mention(node, clause))
+            )
+
+        def supporting_clauses(node: object, body: str) -> List[str]:
+            """Clauses in ``body`` that support ``node``.
+
+            One rule for sectioned and free-form answers alike: a
+            clause supports a candidate only when it mentions the
+            candidate, is neither marker-negative nor negated, and
+            carries an affirmative marker or a spelled mention. A
+            whole-body mention is never enough — every section names
+            its own state, and negative phrasings like "No specific
+            regional relationship" contain the affirmative substring
+            "regional relationship" while matching no negative
+            marker; only the clause veto keeps them out.
+            """
+            # Split on sentence terminators but not '?': a quoted
+            # clue like 'north, perhaps?' must stay inside its clause
+            # so a trailing hedge ("does not specifically identify")
+            # still vetoes the fragment before it.
+            clauses = [
+                clause
+                for clause in re.split(r"[.!;\n]+", body)
+                if clause.strip()
+            ]
+            return [
+                clause for clause in clauses if clause_supports(node, clause)
+            ]
+
         original = ""
         if followup.context is not None:
             original = followup.context.question or ""
@@ -916,20 +960,21 @@ class ZydahVerifier:
                 opens_negative = re.match(
                     r"[^a-z]*none\b", body.strip().lower()
                 )
-                if (
-                    opens_negative
-                    or is_negative(body)
-                    or not (is_affirmative(body) or mentions(node, body))
-                ):
+                if opens_negative or is_negative(body):
+                    continue
+                matched = supporting_clauses(node, body)
+                if not matched:
                     continue
                 support.append(node.id)
                 labels[node.id] = node.label
-                sections[node.id] = body.strip()
+                sections[node.id] = " ".join(
+                    clause.strip() for clause in matched
+                )
         else:
             # Free-form answer: judge each clause separately.
             clauses = [
                 clause
-                for clause in re.split(r"[.!?;\n]+", text)
+                for clause in re.split(r"[.!;\n]+", text)
                 if clause.strip()
             ]
             # A clause naming several candidates is an enumeration of
@@ -940,24 +985,10 @@ class ZydahVerifier:
                 if sum(mentions(node, clause) for node in nodes) <= 1
             ]
             for node in nodes:
-                state_name = str(
-                    node.features.get("state_name", "")
-                ).lower()
-
-                def spelled_mention(clause: str) -> bool:
-                    lowered = clause.lower()
-                    return bool(
-                        (state_name and state_name in lowered)
-                        or node.label.lower() in lowered
-                    )
-
                 matched_clauses = [
                     clause
                     for clause in evidence_clauses
-                    if mentions(node, clause)
-                    and not is_negative(clause)
-                    and not is_negated(clause)
-                    and (is_affirmative(clause) or spelled_mention(clause))
+                    if clause_supports(node, clause)
                 ]
                 if matched_clauses:
                     support.append(node.id)
