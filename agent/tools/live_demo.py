@@ -351,6 +351,33 @@ def _model_id(cfg) -> str:
     return os.environ.get(str(cfg.model.env_var)) or str(cfg.model.id)
 
 
+_QUESTION_LEADS = frozenset(
+    {
+        "what", "which", "who", "whom", "whose", "where", "when", "why",
+        "how", "is", "are", "was", "were", "do", "does", "did", "can",
+        "could", "would", "should", "may", "might", "will", "shall",
+        "have", "has",
+    }
+)
+
+
+def _looks_like_question(text: str) -> bool:
+    """True for question-shaped text, with or without a '?'.
+
+    The '?' marker is sufficient but not necessary: a single bare
+    input such as "what is the weather in springfield" is still a
+    question for the model, not a direction to fold into the old
+    claim. Leading-interrogative detection is conservative — only
+    the first word decides — so directions like "use Springfield,
+    MA" stay directions.
+    """
+    stripped = text.strip()
+    if _ends_with_question(stripped):
+        return True
+    first = re.split(r"[\s,;:]+", stripped.lower(), maxsplit=1)[0]
+    return first.strip("\"'`") in _QUESTION_LEADS
+
+
 def _ends_with_question(text: str) -> bool:
     """True when the last meaningful line of a response is a question.
 
@@ -1583,9 +1610,10 @@ def run_question(
     # The human directs from the input buffer: typed text is sent as
     # a direction on Enter; an empty buffer releases Zydah to finish
     # evaluating the current response in its accumulated context.
-    # Buffered text ending in '?' is not a direction, though: it is
-    # a new question for the model. Route it (recorded as a Human
-    # question), score its answer, and gate again on that answer.
+    # Buffered question-shaped text is not a direction, though: it
+    # is a new question for the model, with or without a '?'. Route
+    # it (recorded as a Human question), score its answer, and gate
+    # again on that answer.
     question_rounds = 0
     while paused_result is None:
         try:
@@ -1611,7 +1639,7 @@ def run_question(
             return _quit_result(paused), verifier, response
         if not direction.strip():
             break
-        if not _ends_with_question(direction.strip()):
+        if not _looks_like_question(direction.strip()):
             context_lines.append(f"Human direction: {direction.strip()}")
             _condition_on_text(direction.strip())
             break

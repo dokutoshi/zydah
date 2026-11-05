@@ -1199,6 +1199,65 @@ def test_gate_question_is_sent_to_model_not_scored_as_direction(monkeypatch):
     assert final["verdict"] == "good"
 
 
+def test_gate_bare_question_without_mark_reaches_model(monkeypatch):
+    """Regression: a single bare input like "what is the weather in
+    springfield" (no '?') at the gate is a question for the model,
+    not a Human direction folded into the old claim — otherwise it
+    never reaches the model or the graph resolver."""
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.create(
+        {
+            "model": {"env_var": "LIVE_DEMO_TEST_MODEL", "id": "m-test"},
+            "human_question_markers": ["which"],
+            "max_iterations": 5,
+        }
+    )
+    answers = iter(
+        ["A cat is a feline.", "There are many Springfields in the US."]
+    )
+    prompts = []
+
+    def fake_chat(prompt, model_id=None):
+        prompts.append(prompt)
+        return iter([next(answers)])
+
+    class CapturingVerifier(FakeVerifier):
+        def verify_direct(self, evidence, first_response=None, assumptions=None):
+            self.evidence = evidence
+            return {
+                "verdict": "good",
+                "needs_human": False,
+                "followups": 0,
+                "history": [],
+            }
+
+    verifier = CapturingVerifier()
+    monkeypatch.setattr(live_demo, "stream_chat_complete", fake_chat)
+    monkeypatch.setattr(live_demo, "_terminal_fd", lambda: None)
+    monkeypatch.setattr(
+        live_demo, "build_verifier", lambda q, r, m, **kw: verifier
+    )
+    typed = iter(["what is the weather in springfield", ""])
+
+    final, _verifier, response = live_demo.run_question(
+        "a dog is a canine and a cat is a what?",
+        cfg=cfg,
+        ask=lambda prompt: next(typed),
+        emit=lambda line: None,
+    )
+
+    assert len(prompts) == 2
+    assert "what is the weather in springfield" in prompts[1]
+    assert response == "There are many Springfields in the US."
+    assert (
+        "Human question: what is the weather in springfield"
+        in verifier.evidence
+    )
+    assert "Human direction:" not in verifier.evidence
+    assert final["verdict"] == "good"
+
+
 def test_gate_q_marks_quit_so_main_can_say_bye(monkeypatch):
     """'q' at the gate is a quit, not a silent pause: it is flagged
     so main exits with [zydah] bye, keeping the checkpoint that was
